@@ -39,4 +39,4 @@ jobs:
           gradle-version: wrapper
 
       - name: Build and Test
-        run: ./ci/build.sh
+        run: bash ./ci/build.sh
