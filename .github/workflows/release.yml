@@ -6,35 +6,35 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest  # You can choose a different runner if needed
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v7
 
       - name: Set up JDK 11
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 11
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: wrapper
 
       - name: Build Shaded JAR
         run: |
           COMMIT_SHA=$(git rev-parse --short HEAD)
-          ./gradlew :client:shadowJar -Pmicrobot.commit.sha=$COMMIT_SHA
+          bash ./gradlew :client:shadowJar -Pmicrobot.commit.sha=$COMMIT_SHA
 
 
       - name: Read microbot.version from Gradle
         id: version
         run: |
-          V=$(./gradlew -q properties --console=plain | sed -n 's/^microbot.version: //p')
+          V=$(bash ./gradlew -q properties --console=plain | sed -n 's/^microbot.version: //p')
           if [ -z "$V" ]; then V=$(grep '^microbot.version=' gradle.properties | cut -d= -f2); fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Using version: $V"
@@ -46,38 +46,29 @@ jobs:
           cp "$SRC" "$DEST"
 
       - name: Create Release
-        uses: "marvinpinto/action-automatic-releases@latest"
+        uses: softprops/action-gh-release@v3
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "${{ steps.version.outputs.version }}"
+          tag_name: "${{ steps.version.outputs.version }}"
           prerelease: false
-          title: "Release ${{ steps.version.outputs.version }}"
+          name: "Release ${{ steps.version.outputs.version }}"
+          fail_on_unmatched_files: true
           files: |
-            /home/runner/work/Microbot/Microbot/runelite-client/build/libs/microbot-*.jar
-
-      - name: Upload Jar to Hetzner
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: root
-          key: ${{ secrets.PROD_SSH_KEY }}
-          source: runelite-client/build/libs/microbot-*.jar
-          target: /var/www/files/releases/microbot/stable/
-          strip_components: 3
+            runelite-client/build/libs/microbot-*.jar
 
       - name: Get Auth Token
         id: auth
         run: |
-          RESPONSE=$(curl -X POST \
+          RESPONSE=$(curl --fail-with-body -X POST \
             -H "Content-Type: application/json" \
             -d "{\"email\":\"${{ secrets.API_EMAIL }}\",\"password\":\"${{ secrets.API_PASSWORD }}\"}" \
             https://microbot.cloud/api/auth/login)
-          TOKEN=$(echo $RESPONSE | jq -r '.token')
+          TOKEN=$(echo "$RESPONSE" | jq -er '.token')
+          echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Update API Version
         run: |
-          curl -X PUT \
+          curl --fail-with-body -X PUT \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -H "Content-Type: application/json" \
             -d "{\"version\":\"${{ steps.version.outputs.version }}\"}" \
