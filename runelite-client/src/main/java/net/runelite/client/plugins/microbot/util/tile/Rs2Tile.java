@@ -68,6 +68,11 @@ public abstract class Rs2Tile implements Tile {
         return Boolean.TRUE.equals(runClientRead(() -> action.getAsBoolean(), false));
     }
 
+	private static Point sceneLocation(Tile tile) {
+		return tile == null ? null : Microbot.getClientThread()
+			.runOnClientThreadOptional(tile::getSceneLocation).orElse(null);
+	}
+
     /**
      * Initializes the tile executor
      * This will handle the removal of dangerous tiles after a certain amount of time
@@ -215,8 +220,10 @@ public abstract class Rs2Tile implements Tile {
 
         final int[][] flags = getFlagsInternal();
         if (flags == null) return false;
+		Point sceneLocation = sceneLocation(tile);
+		if (sceneLocation == null) return false;
 
-        return isWalkable(flags, tile.getSceneLocation().getX(), tile.getSceneLocation().getY());
+		return isWalkable(flags, sceneLocation.getX(), sceneLocation.getY());
     }
 
     public static boolean isWalkable(WorldPoint worldPoint) {
@@ -370,7 +377,8 @@ public abstract class Rs2Tile implements Tile {
 
             final LocalPoint lp;
             if (isInstance) {
-                WorldPoint instancePoint = WorldPoint.toLocalInstance(wv, point).stream().findFirst().orElse(null);
+                WorldPoint instancePoint = localInstancePoints(wv, point).stream()
+                        .findFirst().orElse(null);
                 if (instancePoint == null) continue;
                 lp = LocalPoint.fromWorld(wv, instancePoint);
             } else {
@@ -501,6 +509,110 @@ public abstract class Rs2Tile implements Tile {
      */
     public static boolean isTileReachable(WorldPoint targetPoint) {
         return runClientReadBoolean(() -> isTileReachableInternal(targetPoint));
+    }
+
+    /**
+     * Whether one adjacent step is currently permitted by the loaded client's collision flags.
+     * Unlike {@link #isTileReachable(WorldPoint)}, this is a constant-time edge observation and can
+     * release a door wait on the tick the server clears that door's blocking flag.
+     *
+     * <p>Unknown states fail closed: off-scene points, instances, unloaded planes and invalid input
+     * all return {@code false}. {@link #lastEdgeDecision()} distinguishes unknown from blocked so a
+     * caller may choose an appropriate fallback.</p>
+     */
+    public static boolean isEdgePassable(WorldPoint from, WorldPoint to) {
+        return runClientReadBoolean(() -> isEdgePassableInternal(from, to));
+    }
+
+    private static volatile String lastEdgeDecision = "-";
+
+    public static String lastEdgeDecision() {
+        return lastEdgeDecision;
+    }
+
+    private static boolean isEdgePassableInternal(WorldPoint from, WorldPoint to) {
+        if (from == null || to == null || from.getPlane() != to.getPlane()) {
+            lastEdgeDecision = "bad-args";
+            return false;
+        }
+
+        int dx = to.getX() - from.getX();
+        int dy = to.getY() - from.getY();
+        if (dx == 0 && dy == 0) {
+            lastEdgeDecision = "same-tile";
+            return true;
+        }
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+            lastEdgeDecision = "not-adjacent";
+            return false;
+        }
+
+        EdgeSceneSnapshot scene = edgeSceneSnapshot();
+        if (scene == null) {
+            lastEdgeDecision = "no-worldview";
+            return false;
+        }
+        if (scene.plane != from.getPlane()) {
+            lastEdgeDecision = "plane-not-loaded";
+            return false;
+        }
+        if (scene.instance) {
+            lastEdgeDecision = "instance";
+            return false;
+        }
+
+        int[][] flags = scene.flags;
+        if (flags == null) {
+            lastEdgeDecision = "no-flags";
+            return false;
+        }
+
+        int fromX = from.getX() - scene.baseX;
+        int fromY = from.getY() - scene.baseY;
+        int toX = fromX + dx;
+        int toY = fromY + dy;
+        if (!isWithinBounds(fromX, fromY) || !isWithinBounds(toX, toY)) {
+            lastEdgeDecision = "off-scene";
+            return false;
+        }
+
+        boolean allowed = isStepAllowed(flags, fromX, fromY, dx, dy);
+        lastEdgeDecision = allowed ? "open" : "blocked";
+        return allowed;
+    }
+
+    /** Collision decision isolated from client reads for exhaustive unit testing. */
+    static boolean isStepAllowed(int[][] flags, int fromX, int fromY, int dx, int dy) {
+        if (dx == 0 && dy == 0) {
+            return true;
+        }
+        int toX = fromX + dx;
+        int toY = fromY + dy;
+        if ((flags[toX][toY] & CollisionDataFlag.BLOCK_MOVEMENT_FULL) != 0) {
+            return false;
+        }
+        if (dx == 0 || dy == 0) {
+            return (flags[fromX][fromY] & cardinalBlockFlag(dx, dy)) == 0;
+        }
+        return (flags[fromX][fromY] & cardinalBlockFlag(dx, 0)) == 0
+                && (flags[fromX][fromY] & cardinalBlockFlag(0, dy)) == 0
+                && (flags[toX][fromY]
+                & (CollisionDataFlag.BLOCK_MOVEMENT_FULL | cardinalBlockFlag(0, dy))) == 0
+                && (flags[fromX][toY]
+                & (CollisionDataFlag.BLOCK_MOVEMENT_FULL | cardinalBlockFlag(dx, 0))) == 0;
+    }
+
+    private static int cardinalBlockFlag(int dx, int dy) {
+        if (dx > 0) {
+            return CollisionDataFlag.BLOCK_MOVEMENT_EAST;
+        }
+        if (dx < 0) {
+            return CollisionDataFlag.BLOCK_MOVEMENT_WEST;
+        }
+        if (dy > 0) {
+            return CollisionDataFlag.BLOCK_MOVEMENT_NORTH;
+        }
+        return CollisionDataFlag.BLOCK_MOVEMENT_SOUTH;
     }
 
     private static boolean isTileReachableInternal(WorldPoint targetPoint) {
@@ -948,12 +1060,50 @@ public abstract class Rs2Tile implements Tile {
     }
 
     private static boolean isBankBoothInternal(WorldPoint source) {
-        GameObject gameObject = Rs2GameObject.getGameObjects().stream().filter(x -> x.getWorldLocation().equals(source)).findFirst().orElse(null);
+        GameObject gameObject = Rs2GameObject.getGameObjects().stream()
+                .filter(x -> source.equals(gameObjectWorldLocation(x))).findFirst().orElse(null);
         if (gameObject != null) {
             ObjectComposition objectComposition = Rs2GameObject.convertToObjectComposition(gameObject);
             return objectComposition != null && objectComposition.getName().equalsIgnoreCase("bank booth");
         }
         return false;
+    }
+
+    private static Collection<WorldPoint> localInstancePoints(WorldView worldView,
+                                                               WorldPoint worldPoint) {
+        return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                WorldPoint.toLocalInstance(worldView, worldPoint)).orElse(Collections.emptyList());
+    }
+
+    private static WorldPoint gameObjectWorldLocation(GameObject gameObject) {
+        return Microbot.getClientThread().runOnClientThreadOptional(
+                gameObject::getWorldLocation).orElse(null);
+    }
+
+    private static EdgeSceneSnapshot edgeSceneSnapshot() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            WorldView worldView = Microbot.getClient().getTopLevelWorldView();
+            return worldView == null ? null : new EdgeSceneSnapshot(worldView.getBaseX(),
+                    worldView.getBaseY(), worldView.getPlane(), worldView.isInstance(),
+                    getFlagsInternal());
+        }).orElse(null);
+    }
+
+    private static final class EdgeSceneSnapshot {
+        private final int baseX;
+        private final int baseY;
+        private final int plane;
+        private final boolean instance;
+        private final int[][] flags;
+
+        private EdgeSceneSnapshot(int baseX, int baseY, int plane, boolean instance,
+                                  int[][] flags) {
+            this.baseX = baseX;
+            this.baseY = baseY;
+            this.plane = plane;
+            this.instance = instance;
+            this.flags = flags;
+        }
     }
 
     /**
@@ -1009,7 +1159,9 @@ public abstract class Rs2Tile implements Tile {
     private static boolean isValidTileInternal(Tile tile) {
         if (tile == null) return false;
         int[][] flags = Microbot.getClient().getCollisionMaps()[Microbot.getClient().getPlane()].getFlags();
-        int data = flags[tile.getSceneLocation().getX()][tile.getSceneLocation().getY()];
+		Point sceneLocation = sceneLocation(tile);
+		if (sceneLocation == null) return false;
+		int data = flags[sceneLocation.getX()][sceneLocation.getY()];
 
         Set<MovementFlag> movementFlags = MovementFlag.getSetFlags(data);
 
@@ -1059,8 +1211,11 @@ public abstract class Rs2Tile implements Tile {
             }
         }
 
-        Point p1 = source.getSceneLocation();
-        Point p2 = other.getSceneLocation();
+		Point p1 = sceneLocation(source);
+		Point p2 = sceneLocation(other);
+		if (p1 == null || p2 == null) {
+			return null;
+		}
 
         int middleX = p1.getX();
         int middleY = p1.getY();
@@ -1289,8 +1444,11 @@ public abstract class Rs2Tile implements Tile {
             Arrays.fill(distances[i], Integer.MAX_VALUE);
         }
 
-        Point p1 = source.getSceneLocation();
-        Point p2 = other.getSceneLocation();
+		Point p1 = sceneLocation(source);
+		Point p2 = sceneLocation(other);
+		if (p1 == null || p2 == null) {
+			return null;
+		}
 
         int middleX = p1.getX();
         int middleY = p1.getY();

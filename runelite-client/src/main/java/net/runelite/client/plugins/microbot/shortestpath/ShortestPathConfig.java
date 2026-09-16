@@ -327,7 +327,7 @@ public interface ShortestPathConfig extends Config {
             section = sectionSettings
     )
     default boolean useWildernessObelisks() {
-        return true;
+        return false;
     }
 
     @ConfigItem(
@@ -741,10 +741,22 @@ public interface ShortestPathConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "useBankedElementalStaffs",
+            name = "Use banked elemental staffs",
+            description = "Optional: withdraw an elemental staff for teleport spells when Walk with banked transports is enabled. " +
+                    "Restores your original weapon after casting, but leaves the staff in your inventory. Off uses rune withdrawals only.",
+            position = 2,
+            section = sectionAdvanced
+    )
+    default boolean useBankedElementalStaffs() {
+        return false;
+    }
+
+    @ConfigItem(
             keyName = "minBankRouteSavings",
             name = "Min. bank route savings (tiles)",
             description = "Minimum number of tiles the bank route must be shorter than the direct route to use banking.",
-            position = 2,
+            position = 3,
             section = sectionAdvanced
     )
     @Range(min = 0)
@@ -813,56 +825,56 @@ public interface ShortestPathConfig extends Config {
 	@ConfigItem(
 			keyName = "spiritTreeEtceteria",
 			name = "Etceteria",
-			description = "Use the spirit tree teleport to Etceteria",
+			description = "Use the player-grown spirit tree at Etceteria when it is fully grown",
 			position = 0,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeEtceteria() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeBrimhaven",
 			name = "Brimhaven",
-			description = "Use the spirit tree teleport to Brimhaven",
+			description = "Use the player-grown spirit tree at Brimhaven when it is fully grown",
 			position = 1,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeBrimhaven() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreePortSarim",
 			name = "Port Sarim",
-			description = "Use the spirit tree teleport to Port Sarim",
+			description = "Use the player-grown spirit tree at Port Sarim when it is fully grown",
 			position = 2,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreePortSarim() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeHosidius",
 			name = "Hosidius",
-			description = "Use the spirit tree teleport to Hosidius",
+			description = "Use the player-grown spirit tree at Hosidius when it is fully grown",
 			position = 3,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeHosidius() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeFarmingGuild",
 			name = "Farming Guild",
-			description = "Use the spirit tree teleport to the Farming Guild",
+			description = "Use the player-grown spirit tree at the Farming Guild when it is fully grown",
 			position = 4,
 			section = sectionSpiritTrees
 	)
     default boolean spiritTreeFarmingGuild() {
-        return true;
+        return false;
     }
 
     @ConfigSection(
@@ -894,11 +906,18 @@ public interface ShortestPathConfig extends Config {
         return true;
     }
 
+	/** Compatibility accessor; navigation ownership is no longer configurable. */
+	@Deprecated
+	default boolean navigationEngineOrdinaryWalking()
+	{
+		return true;
+	}
+
     @ConfigItem(
             keyName = "resetLearnedCollision",
             name = "Reset learned collision",
             description = "Turn ON to wipe the accumulated live-collision store — both in memory and on disk (~/.runelite/microbot/live-collision). Saves OFF automatically. Use if a bad capture ever corrupts routing; with Live collision still ON it re-learns from scratch as you travel.",
-            position = 2,
+            position = 3,
             section = sectionDeveloper
     )
     default boolean resetLearnedCollision() {

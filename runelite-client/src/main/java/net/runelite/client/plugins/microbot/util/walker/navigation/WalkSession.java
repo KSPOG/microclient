@@ -1,0 +1,135 @@
+package net.runelite.client.plugins.microbot.util.walker.navigation;
+
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.client.plugins.microbot.util.walker.banking.SpellEquipmentTransaction;
+
+import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/** Mutable state owned exclusively by one {@link NavigationEngine}. */
+final class WalkSession
+{
+	final NavigationRequest request;
+	NavigationPhase phase = NavigationPhase.NEW;
+	RoutePlan routePlan;
+	long generation;
+	int rawProgressIndex = -1;
+	int smoothedProgressIndex = -1;
+	WorldPoint lastObservedPlayer;
+	long lastObservedAtMs;
+	NavigationDecision lastDecision = NavigationDecision.of(
+		NavigationDecision.Type.NO_ACTION, "session-created");
+	long lastCommandAtMs;
+	final Map<RecoveryCause, Integer> recoveryAttempts = new EnumMap<>(RecoveryCause.class);
+	final Set<Integer> blockedEdgesReplanned = new HashSet<>();
+	String terminalReason = "";
+	String transitionReason = "session-created";
+	boolean commandPending;
+	boolean commandRejected;
+	boolean rejectedMovement;
+	int localMovementRetries;
+	WorldPoint recoveryProgressOrigin;
+	int recoveryProgressIndex = -1;
+	long recoveryProgressAtMs;
+	WorldPoint commandOrigin;
+	WorldPoint lastObservedDestination;
+	WorldPoint commandDestinationAtIssue;
+	WorldPoint commandTarget;
+	int commandRawIndex = -1;
+	int commandHandoffDistance = -1;
+	int commandOriginRawIndex = -1;
+	long lastProgressAtMs;
+	int lastProgressRawIndex = -1;
+	int routeDistance = Integer.MAX_VALUE;
+	RouteInteraction pendingInteraction;
+	SpellEquipmentTransaction equipmentTransaction;
+	boolean equipmentRestorationRequired;
+	long equipmentRestorationStartedAtMs = -1L;
+	boolean equipmentCommandAttempted;
+	boolean equipmentTabCommandAttempted;
+	boolean staffEquipAttempted;
+	boolean staffTabAttempted;
+	long staffPreparationStartedAtMs = -1L;
+	final List<RouteInteraction> clearedInteractionsAwaitingCrossing = new ArrayList<>();
+	boolean interactionCommandPending;
+	WorldPoint interactionCommandOrigin;
+	long interactionCommandDeadlineMs;
+	boolean interactionClearedObserved;
+	int stochasticTransitionAttempts;
+
+	WalkSession(NavigationRequest request)
+	{
+		this.request = request;
+	}
+
+	void transitionTo(NavigationPhase next, String reason)
+	{
+		if (phase.isTerminal())
+		{
+			return;
+		}
+		phase = next;
+		transitionReason = reason;
+		if (next.isTerminal())
+		{
+			terminalReason = reason;
+		}
+	}
+
+	void install(RoutePlan plan)
+	{
+		if (equipmentTransaction != null) equipmentRestorationRequired = true;
+		routePlan = plan;
+		generation = plan.getGeneration();
+		rawProgressIndex = -1;
+		smoothedProgressIndex = -1;
+		commandPending = false;
+		commandRejected = false;
+		commandOrigin = null;
+		lastObservedDestination = null;
+		commandDestinationAtIssue = null;
+		commandTarget = null;
+		commandRawIndex = -1;
+		commandHandoffDistance = -1;
+		commandOriginRawIndex = -1;
+		lastProgressAtMs = 0L;
+		lastProgressRawIndex = -1;
+		recoveryProgressOrigin = null;
+		recoveryProgressIndex = -1;
+		blockedEdgesReplanned.clear();
+		pendingInteraction = null;
+		clearedInteractionsAwaitingCrossing.clear();
+		interactionCommandPending = false;
+		interactionCommandOrigin = null;
+		interactionCommandDeadlineMs = 0L;
+		interactionClearedObserved = false;
+		stochasticTransitionAttempts = 0;
+		routeDistance = Integer.MAX_VALUE;
+	}
+
+	int incrementRecovery(RecoveryCause cause)
+	{
+		int attempts = recoveryAttempts.getOrDefault(cause, 0) + 1;
+		recoveryAttempts.put(cause, attempts);
+		return attempts;
+	}
+
+	int recoveryAttempts(RecoveryCause cause)
+	{
+		return recoveryAttempts.getOrDefault(cause, 0);
+	}
+
+	int totalRecoveryAttempts()
+	{
+		int total = 0;
+		for (int attempts : recoveryAttempts.values())
+		{
+			total += attempts;
+		}
+		return total;
+	}
+}

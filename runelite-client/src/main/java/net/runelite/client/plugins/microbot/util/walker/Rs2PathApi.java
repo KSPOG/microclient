@@ -1,21 +1,22 @@
 package net.runelite.client.plugins.microbot.util.walker;
 
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig;
 import net.runelite.client.plugins.microbot.shortestpath.ShortestPathPlugin;
 import net.runelite.client.plugins.microbot.shortestpath.TeleportationItem;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.Pathfinder;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.PathfinderConfig;
+import net.runelite.client.plugins.microbot.util.walker.navigation.RoutePlannerRuntime;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationWalkRuntime;
 import net.runelite.client.ui.overlay.worldmap.WorldMapPoint;
 
 import java.awt.image.BufferedImage;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 
 /**
- * Microbot-owned facade over the shortest-path plugin's mutable static state.
+ * Microbot-owned compatibility facade over shortest-path configuration and presentation state.
  *
  * <p><b>Why this exists (Stage 2 of the facade migration — see
  * {@code shortestpath/WEBWALKER_IMPROVEMENT_PLAN.md} "Facade migration").</b>
@@ -26,24 +27,27 @@ import java.util.concurrent.Future;
  * upstream backports can change the plugin internals while only this facade (and not every
  * consumer) has to move with them.</p>
  *
- * <p><b>Contract.</b> This is a <i>thin, 1:1 delegation</i>. Every method here forwards verbatim to
- * the corresponding {@link ShortestPathPlugin} static member catalogued in the Stage 1 sweep. It
- * intentionally introduces <b>no behaviour change</b> and holds <b>no state</b> of its own. The
+ * <p><b>Contract.</b> Pathfinder task ownership lives in {@link RoutePlannerRuntime}. This facade
+ * retains a read-only {@link #getPathfinder()} compatibility view and no longer exposes the
+ * planner's executor, Future, mutex, or lifecycle setters. The remaining methods delegate plugin
+ * configuration and presentation state. The
  * value types it returns ({@link Pathfinder}, {@link PathfinderConfig}, {@link Transport},
  * {@code TransportType}, {@code WorldPointUtil}) are treated as the stable Microbot-facing path API
  * and are deliberately <i>not</i> re-wrapped — they are pure data / pure functions.</p>
  *
- * <p><b>Migration status.</b> Stage 3 is complete: every consumer under {@code microbot/util/} now
- * routes through this facade, so the only remaining references to {@link ShortestPathPlugin}'s
- * static members outside the {@code shortestpath} package are the delegations below. That invariant
- * is greppable, and is what keeps the blast radius of an upstream backport confined to this class:
- * <pre>grep -rn "ShortestPathPlugin\." microbot/util/   # expect hits in Rs2PathApi only</pre>
- * {@link ShortestPathPlugin}'s members remain public and binary-compatible for out-of-tree callers.
- * Do not add logic here — if a call needs new behaviour, put it behind the plugin and expose it
- * through a matching delegate.</p>
+ * <p><b>Migration status.</b> Phase 1 removed mutable plugin lifecycle access. Phase 2 moves legacy
+ * path consumers to immutable {@code RoutePlan}/{@code NavigationSnapshot} views. The remaining
+ * Pathfinder compatibility getter is removed after that cutover. Historical facade notes remain
+ * in {@code shortestpath/WEBWALKER_IMPROVEMENT_PLAN.md}.</p>
  */
 public final class Rs2PathApi
 {
+	private static volatile PathfinderConfig pathfinderConfig;
+	private static volatile boolean startPointSet;
+	private static volatile int reachedDistance;
+	private static volatile WorldPoint lastLocation = new WorldPoint(0, 0, 0);
+	private static volatile WorldMapPoint marker;
+
 	private Rs2PathApi()
 	{
 	}
@@ -61,40 +65,7 @@ public final class Rs2PathApi
 	/** @return the current pathfinder instance, or {@code null} if none is running. */
 	public static Pathfinder getPathfinder()
 	{
-		return ShortestPathPlugin.getPathfinder();
-	}
-
-	public static void setPathfinder(Pathfinder pathfinder)
-	{
-		ShortestPathPlugin.setPathfinder(pathfinder);
-	}
-
-	/** @return the {@link Future} tracking the in-flight pathfinding task, or {@code null}. */
-	public static Future<?> getPathfinderFuture()
-	{
-		return ShortestPathPlugin.getPathfinderFuture();
-	}
-
-	public static void setPathfinderFuture(Future<?> future)
-	{
-		ShortestPathPlugin.setPathfinderFuture(future);
-	}
-
-	/** @return the single-threaded executor pathfinding runs on. */
-	public static ExecutorService getPathfindingExecutor()
-	{
-		return ShortestPathPlugin.getPathfindingExecutor();
-	}
-
-	public static void setPathfindingExecutor(ExecutorService executor)
-	{
-		ShortestPathPlugin.setPathfindingExecutor(executor);
-	}
-
-	/** @return the monitor guarding pathfinder start/cancel transitions. */
-	public static Object getPathfinderMutex()
-	{
-		return ShortestPathPlugin.getPathfinderMutex();
+		return RoutePlannerRuntime.getPathfinder();
 	}
 
 	// ------------------------------------------------------------------
@@ -104,13 +75,28 @@ public final class Rs2PathApi
 	/** @return the shared pathfinder configuration (transports, restrictions, toggles). */
 	public static PathfinderConfig getPathfinderConfig()
 	{
-		return ShortestPathPlugin.getPathfinderConfig();
+		return pathfinderConfig;
+	}
+
+	public static void setPathfinderConfig(PathfinderConfig nextPathfinderConfig)
+	{
+		pathfinderConfig = nextPathfinderConfig;
+	}
+
+	public static void configureWalker(ShortestPathConfig config)
+	{
+		Rs2Walker.setConfig(config);
 	}
 
 	/** Distance from the target at which the path is considered reached. */
 	public static void setReachedDistance(int reachedDistance)
 	{
-		ShortestPathPlugin.setReachedDistance(reachedDistance);
+		Rs2PathApi.reachedDistance = reachedDistance;
+	}
+
+	public static int getReachedDistance()
+	{
+		return reachedDistance;
 	}
 
 	public static boolean override(String configOverrideKey, boolean defaultValue)
@@ -132,26 +118,31 @@ public final class Rs2PathApi
 	// Target / walker state
 	// ------------------------------------------------------------------
 
-	/** Clears the active target and tears down the current path (see {@link ShortestPathPlugin#exit()}). */
+	/** Clears the active target and tears down the current path. */
 	public static void exit()
 	{
-		ShortestPathPlugin.exit();
+		NavigationWalkRuntime.cancel("path-api:exit");
 	}
 
 	public static boolean isStartPointSet()
 	{
-		return ShortestPathPlugin.isStartPointSet();
+		return startPointSet;
 	}
 
 	public static void setStartPointSet(boolean startPointSet)
 	{
-		ShortestPathPlugin.setStartPointSet(startPointSet);
+		Rs2PathApi.startPointSet = startPointSet;
 	}
 
 	/** Records the player's last known world location (write-only on the plugin). */
 	public static void setLastLocation(WorldPoint lastLocation)
 	{
-		ShortestPathPlugin.setLastLocation(lastLocation);
+		Rs2PathApi.lastLocation = lastLocation;
+	}
+
+	public static WorldPoint getLastLocation()
+	{
+		return lastLocation;
 	}
 
 	// ------------------------------------------------------------------
@@ -160,12 +151,12 @@ public final class Rs2PathApi
 
 	public static WorldMapPoint getMarker()
 	{
-		return ShortestPathPlugin.getMarker();
+		return marker;
 	}
 
 	public static void setMarker(WorldMapPoint marker)
 	{
-		ShortestPathPlugin.setMarker(marker);
+		Rs2PathApi.marker = marker;
 	}
 
 	// ------------------------------------------------------------------
@@ -175,6 +166,7 @@ public final class Rs2PathApi
 	/** @return the transport graph keyed by origin tile. */
 	public static Map<WorldPoint, Set<Transport>> getTransports()
 	{
-		return ShortestPathPlugin.getTransports();
+		PathfinderConfig config = pathfinderConfig;
+		return config == null ? Map.of() : config.getTransports();
 	}
 }

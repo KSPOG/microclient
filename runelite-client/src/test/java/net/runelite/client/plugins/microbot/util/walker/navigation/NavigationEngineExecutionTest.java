@@ -1,0 +1,1887 @@
+package net.runelite.client.plugins.microbot.util.walker.navigation;
+
+import net.runelite.api.coords.WorldPoint;
+import org.junit.After;
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class NavigationEngineExecutionTest
+{
+	private static final WorldPoint A = new WorldPoint(3200, 3200, 0);
+	private static final WorldPoint B = new WorldPoint(3201, 3200, 0);
+	private static final WorldPoint C = new WorldPoint(3202, 3200, 0);
+	private static final WorldPoint UP = new WorldPoint(3200, 3200, 1);
+	private static final WorldPoint UP_TARGET = new WorldPoint(3201, 3200, 1);
+
+	@After
+	public void resetRuntime()
+	{
+		NavigationEngineRuntime.resetForTesting();
+	}
+
+	@Test
+	public void cancelDoesNotWaitForMovementDispatch() throws Exception
+	{
+		assertCancellationDuringDispatch(false);
+	}
+
+	@Test
+	public void cancelDoesNotWaitForInteractionDispatch() throws Exception
+	{
+		assertCancellationDuringDispatch(true);
+	}
+
+	private void assertCancellationDuringDispatch(boolean interaction) throws Exception
+	{
+		startEngineRequest();
+		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				entered.countDown();
+				try
+				{
+					return release.await(5, java.util.concurrent.TimeUnit.SECONDS);
+				}
+				catch (InterruptedException ex)
+				{
+					Thread.currentThread().interrupt();
+					return false;
+				}
+			}
+
+			@Override
+			public boolean interact(RouteInteraction routeInteraction)
+			{
+				return clickTile(routeInteraction.getObjectTile());
+			}
+		};
+		NavigationObservation input = observation(1, A, ordinaryPlan(1), false, false);
+		if (interaction) input = input.withRouteInteraction(new RouteInteraction(1, 0, A, B, B,
+			RouteInteraction.Kind.MINEABLE, RouteInteraction.Status.AVAILABLE, "mine", true));
+		final NavigationObservation dispatchInput = input;
+		try
+		{
+			java.util.concurrent.Future<NavigationExecutionResult> dispatch = executor.submit(
+				() -> NavigationEngineRuntime.execute(dispatchInput, actions));
+			assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
+			NavigationExecutionResult duplicate = NavigationEngineRuntime.execute(dispatchInput,
+				target -> { throw new AssertionError("Concurrent command dispatched"); });
+			assertFalse(duplicate.isCommandIssued());
+			executor.submit(() -> NavigationEngineRuntime.finish("hotkey:ctrl+x"))
+				.get(1, java.util.concurrent.TimeUnit.SECONDS);
+			assertTrue(NavigationEngineRuntime.getSnapshot().isTerminal());
+			release.countDown();
+			assertFalse(dispatch.get(2, java.util.concurrent.TimeUnit.SECONDS).isCommandIssued());
+			assertTrue(NavigationEngineRuntime.getSnapshot().isTerminal());
+		}
+		finally
+		{
+			release.countDown();
+			executor.shutdownNow();
+			assertTrue(executor.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	public void ordinaryRequestIssuesOnlyOneCommandWhileAwaitingAcknowledgement()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+		NavigationExecutionResult second = NavigationEngineRuntime.execute(
+			observation(100, A, ordinaryPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+
+		assertTrue(first.isEngineOwned());
+		assertTrue(first.isCommandIssued());
+		assertEquals(NavigationDecision.Type.WAIT, second.getDecision().getType());
+		assertEquals(1, commands.get());
+	}
+
+	@Test
+	public void ordinaryRequestDispatchesInteractionThroughAdapterOnce()
+	{
+		startEngineRequest();
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction mineable = new RouteInteraction(1, 0, A, B, B,
+			RouteInteraction.Kind.MINEABLE, RouteInteraction.Status.AVAILABLE, "mine", true);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false).withRouteInteraction(mineable), actions);
+		NavigationExecutionResult second = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false).withRouteInteraction(mineable), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, first.getDecision().getType());
+		assertTrue(first.isCommandIssued());
+		assertEquals(NavigationDecision.Type.WAIT, second.getDecision().getType());
+		assertEquals(1, interactions.get());
+	}
+
+	@Test
+	public void reachedDistanceCannotCompleteBeforePendingDoorEdgeIsCrossed()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 2, options, "door-arrival-test"));
+		RouteInteraction availableDoor = new RouteInteraction(1, 0, A, B, B,
+			RouteInteraction.Kind.DOOR, RouteInteraction.Status.AVAILABLE, "open", true);
+		RouteInteraction clearedDoor = new RouteInteraction(1, 0, A, B, B,
+			RouteInteraction.Kind.DOOR, RouteInteraction.Status.CLEARED, "open", true);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				return true;
+			}
+		};
+
+		NavigationExecutionResult interact = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false)
+				.withRouteInteraction(availableDoor), actions);
+		NavigationExecutionResult observeCleared = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false)
+				.withRouteInteraction(clearedDoor), actions);
+		NavigationExecutionResult cross = NavigationEngineRuntime.execute(
+			observation(3, A, ordinaryPlan(1), false, false)
+				.withRouteInteraction(clearedDoor), actions);
+		NavigationExecutionResult retire = NavigationEngineRuntime.execute(
+			observation(4, B, ordinaryPlan(1), false, false)
+				.withRouteInteraction(clearedDoor), actions);
+		NavigationExecutionResult arrived = NavigationEngineRuntime.execute(
+			observation(5, B, ordinaryPlan(1), false, false), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, observeCleared.getDecision().getType());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, cross.getDecision().getType());
+		assertEquals(C, cross.getDecision().getTarget());
+		assertEquals("raw-route-lookahead", cross.getDecision().getTargetSelection());
+		assertEquals(NavigationDecision.Type.WAIT, retire.getDecision().getType());
+		assertEquals(NavigationDecision.Type.COMPLETE, arrived.getDecision().getType());
+	}
+
+	@Test
+	public void clearedInteractionChainsDirectlyToNextReadyInteraction()
+	{
+		startEngineRequest();
+		RouteInteraction firstDoor = new RouteInteraction(1, 0, A, B, B,
+			RouteInteraction.Kind.DOOR, RouteInteraction.Status.AVAILABLE, "open", true);
+		RouteInteraction clearedFirstDoor = firstDoor.withStatus(
+			RouteInteraction.Status.CLEARED, true);
+		RouteInteraction secondDoor = new RouteInteraction(1, 1, B, C, C,
+			RouteInteraction.Kind.DOOR, RouteInteraction.Status.AVAILABLE, "open", true);
+		AtomicInteger clicks = new AtomicInteger();
+		AtomicInteger interactions = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false)
+				.withRouteInteraction(firstDoor), actions);
+		NavigationExecutionResult chained = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false)
+				.withRouteInteractions(clearedFirstDoor, secondDoor), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, first.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, chained.getDecision().getType());
+		assertEquals("interaction-chain-ready", chained.getDecision().getReason());
+		assertEquals(secondDoor, chained.getDecision().getInteraction());
+		assertEquals(0, clicks.get());
+		assertEquals(2, interactions.get());
+	}
+
+	@Test
+	public void rejectedClickRetriesLocallyOnceBeforeReplanning()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions rejecting = target -> {
+			commands.incrementAndGet();
+			return false;
+		};
+
+		NavigationEngineRuntime.execute(observation(1, A, ordinaryPlan(1), false, false), rejecting);
+		NavigationExecutionResult next = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false), rejecting);
+
+		assertEquals(NavigationDecision.Type.WAIT, next.getDecision().getType());
+		assertFalse(next.isCommandIssued());
+		assertEquals(1, commands.get());
+		NavigationEngineRuntime.execute(observation(602, A, ordinaryPlan(1), false, false), rejecting);
+		assertEquals(2, commands.get());
+		next = NavigationEngineRuntime.execute(observation(603, A, ordinaryPlan(1), false, false), rejecting);
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, next.getDecision().getType());
+		assertEquals(2, commands.get());
+	}
+
+	@Test
+	public void registeredOffRouteDestinationTriesExistingRouteFirst()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+		WorldPoint offRouteDestination = new WorldPoint(3182, 3490, 0);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false)
+				.withMovementDestination(offRouteDestination), target -> {
+					commands.incrementAndGet();
+					return true;
+				});
+
+		assertEquals(NavigationDecision.Type.CLICK_TILE, result.getDecision().getType());
+		assertEquals(RecoveryCause.COMMAND_DESTINATION_MISMATCH,
+			result.getDecision().getRecoveryCause());
+		assertEquals(first.getDecision().getTarget(), result.getDecision().getTarget());
+		assertEquals("route-rejoin", result.getDecision().getTargetSelection());
+		assertEquals(1, result.getDecision().getRecoveryAttempt());
+		assertEquals(2, result.getDecision().getRecoveryBudget());
+		assertEquals(2, commands.get());
+	}
+
+	@Test
+	public void chamberApproachTargetsTheResolvedRoomInsteadOfTheHouseAnchor()
+	{
+		for (int objectId : new int[]{13622, 13523, 31986, 29227, -1})
+		{
+			startEngineRequest();
+			WorldPoint room = A.dx(40);
+			RouteInteraction portal = new RouteInteraction(1, 0, A, B, room,
+				objectId == -1 ? RouteInteraction.Kind.FAIRY_RING
+					: objectId == 29227 ? RouteInteraction.Kind.SPIRIT_TREE : RouteInteraction.Kind.TELEPORTATION_PORTAL,
+				RouteInteraction.Status.AVAILABLE,
+				"Teleport", false, objectId, A, B);
+			NavigationExecutionResult result = NavigationEngineRuntime.execute(
+				observation(1, A, ordinaryPlan(1), false, false).withRouteInteraction(portal), target -> true);
+			assertEquals(NavigationDecision.Type.CLICK_TILE, result.getDecision().getType());
+			assertEquals(room, result.getDecision().getTarget());
+			NavigationEngineRuntime.resetForTesting();
+		}
+	}
+
+	@Test
+	public void routeBackedRegisteredDestinationAcknowledgesCommand()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(1), false, false)
+				.withMovementDestination(first.getDecision().getTarget()), target -> {
+					commands.incrementAndGet();
+					return true;
+				});
+
+		assertEquals(NavigationDecision.Type.WAIT, result.getDecision().getType());
+		assertEquals("movement-command-progress-window", result.getDecision().getReason());
+		assertEquals(0, NavigationEngineRuntime.getSnapshot().getRecoveryAttempts(
+			RecoveryCause.COMMAND_DESTINATION_MISMATCH));
+		assertEquals(1, commands.get());
+	}
+
+	@Test
+	public void movingRouteHandsOffOnlyInsideCommandProximityWindow()
+	{
+		List<WorldPoint> raw = new ArrayList<>();
+		for (int i = 0; i <= 25; i++)
+		{
+			raw.add(new WorldPoint(3200 + i, 3200, 0));
+		}
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(raw.get(25)), 0, options, "handoff-test"));
+		RoutePlan plan = new RoutePlan(21, 1, raw.get(0), Collections.singleton(raw.get(25)),
+			raw, Arrays.asList(raw.get(0), raw.get(25)), true);
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions actions = target -> {
+			commands.incrementAndGet();
+			return true;
+		};
+
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, raw.get(0), plan, false, false), actions);
+		int targetIndex = first.getDecision().getTargetRawIndex();
+		int handoff = first.getDecision().getTargetHandoffDistance();
+		NavigationExecutionResult early = NavigationEngineRuntime.execute(
+			observation(2, raw.get(targetIndex - handoff - 1), plan, true, false), actions);
+		NavigationExecutionResult near = NavigationEngineRuntime.execute(
+			observation(3, raw.get(targetIndex - handoff), plan, true, false), actions);
+
+		assertTrue(handoff >= 2 && handoff <= 4);
+		assertEquals(NavigationDecision.Type.WAIT, early.getDecision().getType());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, near.getDecision().getType());
+		assertEquals("proximity-route-handoff", near.getDecision().getReason());
+		assertEquals(2, commands.get());
+	}
+
+	@Test
+	public void proximityHandoffStrictlyAdvancesAndCannotRepeatItsTarget()
+	{
+		List<WorldPoint> raw = new ArrayList<>();
+		for (int i = 0; i <= 30; i++)
+		{
+			raw.add(new WorldPoint(3200 + i, 3200, 0));
+		}
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(raw.get(30)), 0, options, "handoff-forward-test"));
+		RoutePlan plan = new RoutePlan(21, 1, raw.get(0), Collections.singleton(raw.get(30)),
+			raw, Arrays.asList(raw.get(0), raw.get(30)), true);
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions actions = target -> {
+			commands.incrementAndGet();
+			return true;
+		};
+
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, raw.get(0), plan, false, false), actions);
+		int firstTarget = first.getDecision().getTargetRawIndex();
+		int handoff = first.getDecision().getTargetHandoffDistance();
+		WorldPoint nearFirstTarget = raw.get(firstTarget - handoff);
+		NavigationExecutionResult second = NavigationEngineRuntime.execute(
+			observation(2, nearFirstTarget, plan, true, false), actions);
+		NavigationExecutionResult repeated = NavigationEngineRuntime.execute(
+			observation(3, nearFirstTarget, plan, true, false), actions);
+
+		assertEquals(NavigationDecision.Type.CLICK_TILE, second.getDecision().getType());
+		assertTrue(second.getDecision().getTargetRawIndex() > firstTarget);
+		assertEquals(NavigationDecision.Type.WAIT, repeated.getDecision().getType());
+		assertEquals(2, commands.get());
+	}
+
+	@Test
+	public void finalRouteCommandDoesNotRetargetWhileMoving()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions actions = target -> {
+			commands.incrementAndGet();
+			return true;
+		};
+
+		NavigationEngineRuntime.execute(observation(1, A, ordinaryPlan(1), false, false), actions);
+		NavigationExecutionResult moving = NavigationEngineRuntime.execute(
+			observation(2, B, ordinaryPlan(1), true, false), actions);
+
+		assertEquals(NavigationDecision.Type.WAIT, moving.getDecision().getType());
+		assertEquals(1, commands.get());
+	}
+
+	@Test
+	public void unsupportedTransportRouteFailsWithoutLegacyOrInput()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(1, A, transportPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+
+		assertTrue(result.isEngineOwned());
+		assertEquals(NavigationDecision.Type.FAIL, result.getDecision().getType());
+		assertFalse(NavigationEngineRuntime.isExecutionActive());
+		assertEquals(0, commands.get());
+	}
+
+	@Test
+	public void waitingForFirstPlanAlreadyHasEngineOwnership()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(1, A, null, false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+		assertTrue(result.isEngineOwned());
+		assertEquals(NavigationDecision.Type.WAIT, result.getDecision().getType());
+		assertEquals(0, commands.get());
+	}
+
+	@Test
+	public void migratedAdjacentTransportIsEngineOwnedAndInteracted()
+	{
+		startEngineRequest();
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction transport = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.ADJACENT_TRANSPORT, RouteInteraction.Status.AVAILABLE,
+			"Climb-over", true, 123);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return false;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(1, A, adjacentTransportPlan(1), false, false)
+				.withRouteInteraction(transport), actions);
+
+		assertTrue(result.isEngineOwned());
+		assertTrue(NavigationEngineRuntime.isExecutionActive());
+		assertEquals(NavigationDecision.Type.INTERACT, result.getDecision().getType());
+		assertEquals(1, interactions.get());
+	}
+
+	@Test
+	public void reachedDistanceCannotCompleteBeforePublishedAdjacentTransportIsCrossed()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 2, options, "adjacent-transport-arrival-test"));
+		AtomicInteger commands = new AtomicInteger();
+
+		NavigationExecutionResult beforeEdge = NavigationEngineRuntime.execute(
+			observation(1, A, adjacentTransportPlan(1), false, false), target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+
+		assertTrue(beforeEdge.isEngineOwned());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, beforeEdge.getDecision().getType());
+		assertEquals(1, commands.get());
+		assertFalse(NavigationEngineRuntime.getSnapshot().getPhase().isTerminal());
+
+		NavigationExecutionResult afterEdge = NavigationEngineRuntime.execute(
+			observation(2, B, adjacentTransportPlan(1), false, false)
+				.withMovementDestination(C), target -> true);
+
+		assertEquals(NavigationDecision.Type.COMPLETE, afterEdge.getDecision().getType());
+	}
+
+	@Test
+	public void catalogTransitionIsEngineOwnedAndCompletesOnlyAfterLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(UP_TARGET), 0, options, "catalog-transition-test"));
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction transition = new RouteInteraction(1, 0, A, UP, A,
+			RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+			"Climb-up", true, 123, A, UP);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult interact = NavigationEngineRuntime.execute(
+			observation(1, A, catalogTransitionPlan(1), false, false)
+				.withRouteInteraction(transition), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(2, UP, catalogTransitionPlan(1), false, false)
+				.withRouteInteraction(transition.withStatus(
+					RouteInteraction.Status.CLEARED, false)), actions);
+		NavigationExecutionResult arrived = NavigationEngineRuntime.execute(
+			observation(3, UP_TARGET, catalogTransitionPlan(1), false, false), actions);
+
+		assertTrue(interact.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getDecision().getType());
+		assertEquals(1, interactions.get());
+		assertEquals("interaction-edge-crossed", landed.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.COMPLETE, arrived.getDecision().getType());
+	}
+
+	@Test
+	public void laterExternalDestinationOverridesAcknowledgedWalkerCommand()
+	{
+		startEngineRequest();
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false), target -> true);
+		NavigationEngineRuntime.execute(observation(2, A, ordinaryPlan(1), true, false)
+			.withMovementDestination(first.getDecision().getTarget()), target -> true);
+		WorldPoint offRouteDestination = new WorldPoint(3182, 3490, 0);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(3, A, ordinaryPlan(1), true, false)
+				.withMovementDestination(offRouteDestination), target -> true);
+
+		assertEquals(NavigationDecision.Type.CLICK_TILE, result.getDecision().getType());
+		assertEquals(RecoveryCause.COMMAND_DESTINATION_MISMATCH,
+			result.getDecision().getRecoveryCause());
+		assertEquals("route-rejoin", result.getDecision().getTargetSelection());
+	}
+
+	@Test
+	public void failedShortTransitionReplansFromBackwardLanding()
+	{
+		WorldPoint approach = new WorldPoint(2522, 3597, 0);
+		WorldPoint origin = new WorldPoint(2522, 3600, 0);
+		WorldPoint destination = new WorldPoint(2522, 3602, 0);
+		WorldPoint washedBack = new WorldPoint(2522, 3595, 0);
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(destination), 0, options, "failed-short-transition-test"));
+		RoutePlan plan = new RoutePlan(21, 1, origin, Collections.singleton(destination),
+			Arrays.asList(origin, destination), Arrays.asList(origin, destination), true,
+			Collections.singletonList(new RouteEdge(0, origin, destination,
+				RouteEdge.Kind.CATALOG_TRANSITION)));
+		RouteInteraction transition = new RouteInteraction(1, 0, origin, destination,
+			origin, RouteInteraction.Kind.CATALOG_TRANSITION,
+			RouteInteraction.Status.AVAILABLE, "Jump-across", true, 4556,
+			origin, destination);
+		AtomicInteger interactions = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult issued = NavigationEngineRuntime.execute(
+			observation(1, approach, plan, false, false).withRouteInteraction(transition),
+			actions);
+		NavigationExecutionResult displaced = NavigationEngineRuntime.execute(
+			observation(2, washedBack, plan, false, false).withRouteInteraction(transition),
+			actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, issued.getDecision().getType());
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN,
+			displaced.getDecision().getType());
+		assertEquals("interaction-displaced-behind-origin",
+			displaced.getDecision().getReason());
+		assertEquals(1, interactions.get());
+	}
+
+	@Test
+	public void simpleTeleportIsEngineOwnedAndAcknowledgedAtLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "simple-teleport-test"));
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction teleport = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SIMPLE_TELEPORT, RouteInteraction.Status.AVAILABLE,
+			"Varrock Teleport", true, 1, A, B);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult interact = NavigationEngineRuntime.execute(
+			observation(1, A, simpleTeleportPlan(1), false, false)
+				.withRouteInteraction(teleport), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(2, B, simpleTeleportPlan(1), false, false)
+				.withRouteInteraction(teleport.withStatus(
+					RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertTrue(interact.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getDecision().getType());
+		assertEquals(1, interactions.get());
+		assertTrue(landed.isEngineOwned());
+		assertFalse(NavigationEngineRuntime.getSnapshot().getPhase().isTerminal());
+	}
+
+	@Test
+	public void longHomeTeleportRetainsItsCommandThroughTheCastWindow()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "home-teleport-timeout-test"));
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction teleport = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SIMPLE_TELEPORT, RouteInteraction.Status.AVAILABLE,
+			"Lumbridge Home Teleport", true, 1, A, B);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationEngineRuntime.execute(observation(1, A, simpleTeleportPlan(1),
+			false, false).withRouteInteraction(teleport), actions);
+		NavigationExecutionResult casting = NavigationEngineRuntime.execute(
+			observation(20_000, A, simpleTeleportPlan(1), false, false)
+				.withRouteInteraction(teleport), actions);
+		NavigationExecutionResult expired = NavigationEngineRuntime.execute(
+			observation(35_002, A, simpleTeleportPlan(1), false, false)
+				.withRouteInteraction(teleport), actions);
+
+		assertEquals(NavigationDecision.Type.WAIT, casting.getDecision().getType());
+		assertEquals("interaction-command-in-flight", casting.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.INTERACT, expired.getDecision().getType());
+		assertEquals(2, interactions.get());
+	}
+
+	@Test
+	public void simpleTeleportDoesNotRetireBeforeItsDirectedLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "simple-teleport-retention-test"));
+		WorldPoint directedLanding = new WorldPoint(3300, 3300, 0);
+		RouteInteraction teleport = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SIMPLE_TELEPORT, RouteInteraction.Status.AVAILABLE,
+			"Varrock Teleport", true, 1, A, directedLanding);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				return true;
+			}
+		};
+
+		NavigationEngineRuntime.execute(observation(1, A, simpleTeleportPlan(1),
+			false, false).withRouteInteraction(teleport), actions);
+		NavigationExecutionResult projectedAhead = NavigationEngineRuntime.execute(
+			observation(2, B, simpleTeleportPlan(1), false, false)
+				.withRouteInteraction(teleport), actions);
+
+		assertEquals(NavigationDecision.Type.WAIT,
+			projectedAhead.getDecision().getType());
+		assertEquals("interaction-command-in-flight",
+			projectedAhead.getDecision().getReason());
+		assertTrue(NavigationEngineRuntime.getSnapshot().getPendingInteraction() != null);
+	}
+
+	@Test
+	public void npcTransportIsEngineOwnedAndAcknowledgedAtLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "npc-transport-test"));
+		AtomicInteger interactions = new AtomicInteger();
+		RouteInteraction transport = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.NPC_TRANSPORT, RouteInteraction.Status.AVAILABLE,
+			"Follow", true, 4968, A, B);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult interact = NavigationEngineRuntime.execute(
+			observation(1, A, npcTransportPlan(1), false, false)
+				.withRouteInteraction(transport), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(2, B, npcTransportPlan(1), false, false)
+				.withRouteInteraction(transport.withStatus(
+					RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertTrue(interact.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getDecision().getType());
+		assertEquals(1, interactions.get());
+		assertTrue(landed.isEngineOwned());
+		assertFalse(NavigationEngineRuntime.getSnapshot().getPhase().isTerminal());
+	}
+
+	@Test
+	public void charterShipAdvancesThroughUiStagesAndWaitsForLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "charter-ship-test"));
+		java.util.List<String> actionsIssued = new java.util.ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteInteraction npc = charterInteraction("Charter", true);
+		RouteInteraction destination = charterInteraction("charter-destination:Catherby", true);
+		RouteInteraction confirm = charterInteraction("charter-confirm", true);
+
+		NavigationExecutionResult npcResult = NavigationEngineRuntime.execute(
+			observation(1, A, charterShipPlan(1), false, false)
+				.withRouteInteraction(npc), actions);
+		NavigationExecutionResult destinationResult = NavigationEngineRuntime.execute(
+			observation(2, A, charterShipPlan(1), false, false)
+				.withRouteInteraction(destination), actions);
+		NavigationExecutionResult confirmResult = NavigationEngineRuntime.execute(
+			observation(3, A, charterShipPlan(1), false, false)
+				.withRouteInteraction(confirm), actions);
+		NavigationExecutionResult voyage = NavigationEngineRuntime.execute(
+			observation(4, new WorldPoint(500, 500, 1), charterShipPlan(1), false, false)
+				.withRouteInteraction(charterInteraction("charter-confirm", false)), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(5, B, charterShipPlan(1), false, false)
+				.withRouteInteraction(confirm.withStatus(
+					RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, npcResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, destinationResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, confirmResult.getDecision().getType());
+		assertEquals(Arrays.asList("Charter", "charter-destination:Catherby",
+			"charter-confirm"), actionsIssued);
+		assertEquals(NavigationDecision.Type.WAIT, voyage.getDecision().getType());
+		assertTrue(landed.isEngineOwned());
+	}
+
+	@Test
+	public void fairyRingAdvancesThroughStagesAndWaitsForExactLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "fairy-ring-test"));
+		java.util.List<String> actionsIssued = new java.util.ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteInteraction equip = fairyRingInteraction("fairy-ring-equip:772", true);
+		RouteInteraction configure = fairyRingInteraction("Configure", true);
+		RouteInteraction rotate = fairyRingInteraction("fairy-ring-rotate:26083347:512", true);
+		RouteInteraction teleport = fairyRingInteraction("fairy-ring-teleport", true);
+		RouteInteraction restoreOpen = fairyRingInteraction(
+			"fairy-ring-restore-open:6563", true);
+		RouteInteraction restore = fairyRingInteraction("fairy-ring-restore:6563", true);
+
+		NavigationExecutionResult equipResult = NavigationEngineRuntime.execute(
+			observation(1, A, fairyRingPlan(1), false, false)
+				.withRouteInteraction(equip), actions);
+		NavigationExecutionResult configureResult = NavigationEngineRuntime.execute(
+			observation(2, A, fairyRingPlan(1), false, false)
+				.withRouteInteraction(configure), actions);
+		NavigationExecutionResult rotateResult = NavigationEngineRuntime.execute(
+			observation(3, A, fairyRingPlan(1), false, false)
+				.withRouteInteraction(rotate), actions);
+		NavigationExecutionResult teleportResult = NavigationEngineRuntime.execute(
+			observation(4, A, fairyRingPlan(1), false, false)
+				.withRouteInteraction(teleport), actions);
+		NavigationExecutionResult voyage = NavigationEngineRuntime.execute(
+			observation(5, new WorldPoint(500, 500, 1), fairyRingPlan(1), false, false)
+				.withRouteInteraction(fairyRingInteraction("fairy-ring-teleport", false)), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(6, B, fairyRingPlan(1), false, false)
+				.withRouteInteraction(restoreOpen), actions);
+		NavigationExecutionResult restoreResult = NavigationEngineRuntime.execute(
+			observation(7, B, fairyRingPlan(1), false, false)
+				.withRouteInteraction(restore), actions);
+		NavigationExecutionResult restored = NavigationEngineRuntime.execute(
+			observation(8, B, fairyRingPlan(1), false, false)
+				.withRouteInteraction(restore.withStatus(
+					RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, equipResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, configureResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, rotateResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, teleportResult.getDecision().getType());
+		assertEquals(Arrays.asList("fairy-ring-equip:772", "Configure",
+			"fairy-ring-rotate:26083347:512", "fairy-ring-teleport",
+			"fairy-ring-restore-open:6563", "fairy-ring-restore:6563"), actionsIssued);
+		assertEquals(NavigationDecision.Type.WAIT, voyage.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, landed.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, restoreResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, restored.getDecision().getType());
+	}
+
+	@Test
+	public void spiritTreeAdvancesThroughDestinationAndWaitsForLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(22,
+			Collections.singleton(C), 0, options, "spirit-tree-test"));
+		List<String> actionsIssued = new ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteEdge treeEdge = new RouteEdge(0, A, B, RouteEdge.Kind.SPIRIT_TREE);
+		RouteEdge onward = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		RoutePlan plan = new RoutePlan(22, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(treeEdge, onward));
+		RouteInteraction object = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SPIRIT_TREE, RouteInteraction.Status.AVAILABLE,
+			"Travel", true, 1295, A, B);
+		RouteInteraction destination = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SPIRIT_TREE, RouteInteraction.Status.AVAILABLE,
+			"spirit-tree-destination:Gnome Stronghold", true, 1295, A, B);
+
+		NavigationExecutionResult objectResult = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(object), actions);
+		NavigationExecutionResult destinationResult = NavigationEngineRuntime.execute(
+			observation(2, A, plan, false, false).withRouteInteraction(destination), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(3, new WorldPoint(500, 500, 1), plan, false, false)
+				.withRouteInteraction(destination.withStatus(
+					RouteInteraction.Status.AVAILABLE, false)), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(4, B, plan, false, false).withRouteInteraction(
+				destination.withStatus(RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, objectResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT,
+			destinationResult.getDecision().getType());
+		assertEquals(Arrays.asList("Travel",
+			"spirit-tree-destination:Gnome Stronghold"), actionsIssued);
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, landed.getDecision().getType());
+	}
+
+	@Test
+	public void lockedSpiritTreeDestinationReplansImmediatelyAfterTravel()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(23,
+			Collections.singleton(C), 0, options, "locked-spirit-tree-test"));
+		List<String> actionsIssued = new ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteEdge treeEdge = new RouteEdge(0, A, B, RouteEdge.Kind.SPIRIT_TREE);
+		RoutePlan plan = new RoutePlan(23, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(treeEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction object = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SPIRIT_TREE, RouteInteraction.Status.AVAILABLE,
+			"Travel", true, 1295, A, B);
+		RouteInteraction locked = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.SPIRIT_TREE, RouteInteraction.Status.UNAVAILABLE,
+			"spirit-tree-destination:Port Sarim", false, 1295, A, B);
+
+		NavigationExecutionResult travel = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(object), actions);
+		NavigationExecutionResult unavailable = NavigationEngineRuntime.execute(
+			observation(2, A, plan, false, false).withRouteInteraction(locked), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, travel.getDecision().getType());
+		assertEquals(Collections.singletonList("Travel"), actionsIssued);
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN,
+			unavailable.getDecision().getType());
+		assertEquals(RecoveryCause.INTERACTION_UNAVAILABLE,
+			unavailable.getDecision().getRecoveryCause());
+	}
+
+	@Test
+	public void gnomeGliderAdvancesThroughDestinationAndWaitsForLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(24,
+			Collections.singleton(C), 0, options, "gnome-glider-test"));
+		List<String> actionsIssued = new ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteEdge gliderEdge = new RouteEdge(0, A, B, RouteEdge.Kind.GNOME_GLIDER);
+		RoutePlan plan = new RoutePlan(24, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(gliderEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction npc = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.GNOME_GLIDER, RouteInteraction.Status.AVAILABLE,
+			"Glider", true, 10467, A, B);
+		RouteInteraction destination = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.GNOME_GLIDER, RouteInteraction.Status.AVAILABLE,
+			"gnome-glider-destination:Kar-Hewo", true, 10467, A, B);
+
+		NavigationExecutionResult npcResult = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(npc), actions);
+		NavigationExecutionResult destinationResult = NavigationEngineRuntime.execute(
+			observation(2, A, plan, false, false).withRouteInteraction(destination), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(3, new WorldPoint(500, 500, 1), plan, false, false)
+				.withRouteInteraction(destination.withStatus(
+					RouteInteraction.Status.AVAILABLE, false)), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(4, B, plan, false, false).withRouteInteraction(
+				destination.withStatus(RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, npcResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT,
+			destinationResult.getDecision().getType());
+		assertEquals(Arrays.asList("Glider", "gnome-glider-destination:Kar-Hewo"),
+			actionsIssued);
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, landed.getDecision().getType());
+	}
+
+	@Test
+	public void quetzalAdvancesThroughDestinationAndWaitsForLanding()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(25,
+			Collections.singleton(C), 0, options, "quetzal-test"));
+		List<String> actionsIssued = new ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+		RouteEdge quetzalEdge = new RouteEdge(0, A, B, RouteEdge.Kind.QUETZAL);
+		RoutePlan plan = new RoutePlan(25, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(quetzalEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction npc = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.QUETZAL, RouteInteraction.Status.AVAILABLE,
+			"Travel", true, 13350, A, B);
+		RouteInteraction destination = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.QUETZAL, RouteInteraction.Status.AVAILABLE,
+			"quetzal-destination:The Teomat", true, -1, A, B);
+
+		NavigationExecutionResult npcResult = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(npc), actions);
+		NavigationExecutionResult destinationResult = NavigationEngineRuntime.execute(
+			observation(2, A, plan, false, false).withRouteInteraction(destination), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(3, new WorldPoint(500, 500, 1), plan, false, false)
+				.withRouteInteraction(destination.withStatus(
+					RouteInteraction.Status.AVAILABLE, false)), actions);
+		NavigationExecutionResult landed = NavigationEngineRuntime.execute(
+			observation(4, B, plan, false, false).withRouteInteraction(
+				destination.withStatus(RouteInteraction.Status.CLEARED, false)), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, npcResult.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT,
+			destinationResult.getDecision().getType());
+		assertEquals(Arrays.asList("Travel", "quetzal-destination:The Teomat"),
+			actionsIssued);
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, landed.getDecision().getType());
+	}
+
+	@Test
+	public void npcTransportIntermediateSceneDoesNotTriggerOffRouteRecovery()
+	{
+		WorldPoint landing = new WorldPoint(2662, 2677, 1);
+		WorldPoint afterLanding = new WorldPoint(2663, 2677, 1);
+		RouteEdge voyage = new RouteEdge(0, A, landing, RouteEdge.Kind.NPC_TRANSPORT);
+		RouteEdge onward = new RouteEdge(1, landing, afterLanding, RouteEdge.Kind.WALK);
+		RoutePlan voyagePlan = new RoutePlan(21, 1, A,
+			Collections.singleton(afterLanding), Arrays.asList(A, landing, afterLanding),
+			Arrays.asList(A, landing, afterLanding), true, Arrays.asList(voyage, onward));
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(afterLanding), 0, options, "npc-intermediate-scene-test"));
+		RouteInteraction transport = new RouteInteraction(1, 0, A, landing, A,
+			RouteInteraction.Kind.NPC_TRANSPORT, RouteInteraction.Status.AVAILABLE,
+			"Travel", true, 1770, A, landing);
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				return true;
+			}
+		};
+		NavigationEngineRuntime.execute(observation(1, A, voyagePlan,
+			false, false).withRouteInteraction(transport), actions);
+		WorldPoint shipDeck = new WorldPoint(3064, 3208, 1);
+
+		NavigationExecutionResult intermediate = NavigationEngineRuntime.execute(
+			observation(2, shipDeck, voyagePlan, false, false)
+				.withRouteInteraction(transport), actions);
+
+		assertEquals(NavigationDecision.Type.WAIT, intermediate.getDecision().getType());
+		assertEquals("interaction-command-in-flight", intermediate.getDecision().getReason());
+		assertEquals(0, NavigationEngineRuntime.getSnapshot()
+			.getRecoveryAttempts(RecoveryCause.OFF_ROUTE));
+	}
+
+	@Test
+	public void dialogueTransportRetainsOwnershipAcrossLongCarpetTransit()
+	{
+		startEngineRequest();
+		RouteEdge carpetEdge = new RouteEdge(0, A, B,
+			RouteEdge.Kind.NPC_DIALOGUE_TRANSPORT);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(carpetEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.NPC_DIALOGUE_TRANSPORT,
+			RouteInteraction.Status.AVAILABLE,
+			"dialogue-destination:Bedabin Camp", true, 17, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult destination = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult inFlight = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(60_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertEquals(NavigationDecision.Type.INTERACT, destination.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, inFlight.getDecision().getType());
+		assertEquals("interaction-command-in-flight", inFlight.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void hotAirBalloonRetainsRemoteOwnershipUntilBoundedDeadline()
+	{
+		startEngineRequest();
+		RouteEdge balloonEdge = new RouteEdge(0, A, B, RouteEdge.Kind.HOT_AIR_BALLOON);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(balloonEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.HOT_AIR_BALLOON,
+			RouteInteraction.Status.AVAILABLE,
+			"hot-air-balloon-destination:Varrock", true, 19129, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult destination = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(6_001, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertTrue(destination.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, destination.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals("interaction-command-in-flight", transit.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void teleportationLeverRetainsRemoteOwnershipUntilBoundedDeadline()
+	{
+		startEngineRequest();
+		RouteEdge leverEdge = new RouteEdge(0, A, B, RouteEdge.Kind.TELEPORTATION_LEVER);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(leverEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.TELEPORTATION_LEVER,
+			RouteInteraction.Status.AVAILABLE, "Pull", true, 26761, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult pull = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(6_001, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertTrue(pull.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, pull.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals("interaction-command-in-flight", transit.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void wildernessDitchAdvancesWarningStageWithoutLegacyOwnership()
+	{
+		startEngineRequest();
+		RouteEdge ditchEdge = new RouteEdge(0, A, B, RouteEdge.Kind.WILDERNESS_DITCH);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(ditchEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction object = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.WILDERNESS_DITCH, RouteInteraction.Status.AVAILABLE,
+			"Cross", true, 23271, A, B);
+		RouteInteraction warning = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.WILDERNESS_DITCH, RouteInteraction.Status.AVAILABLE,
+			"wilderness-ditch-confirm", true, 23271, A, B);
+		java.util.List<String> actionsIssued = new java.util.ArrayList<>();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				actionsIssued.add(interaction.getAction());
+				return true;
+			}
+		};
+
+		NavigationExecutionResult cross = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(object), actions);
+		NavigationExecutionResult confirm = NavigationEngineRuntime.execute(
+			observation(2, A, plan, false, false).withRouteInteraction(warning), actions);
+		NavigationExecutionResult waiting = NavigationEngineRuntime.execute(
+			observation(3, A, plan, false, false).withRouteInteraction(
+				warning.withStatus(RouteInteraction.Status.AVAILABLE, false)), actions);
+
+		assertTrue(cross.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, cross.getDecision().getType());
+		assertEquals(NavigationDecision.Type.INTERACT, confirm.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, waiting.getDecision().getType());
+		assertEquals(Arrays.asList("Cross", "wilderness-ditch-confirm"), actionsIssued);
+	}
+
+	@Test
+	public void jungleObstacleRetainsOwnershipForSlowChoppingThenReplansBoundedly()
+	{
+		startEngineRequest();
+		RouteEdge jungleEdge = new RouteEdge(0, A, B, RouteEdge.Kind.JUNGLE_OBSTACLE);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(jungleEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.JUNGLE_OBSTACLE, RouteInteraction.Status.AVAILABLE,
+			"Chop-down", true, 2892, A, B);
+		RouteInteraction transformed = available.withStatus(
+			RouteInteraction.Status.UNAVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult chop = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult slow = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false)
+				.withRouteInteraction(transformed), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(60_002, A, plan, false, false)
+				.withRouteInteraction(transformed), actions);
+
+		assertTrue(chop.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, chop.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, slow.getDecision().getType());
+		assertEquals("interaction-unavailable-command-in-flight",
+			slow.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN,
+			deadline.getDecision().getType());
+		assertEquals("interaction-unavailable", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+	}
+
+	@Test
+	public void canoeRetainsRemoteOwnershipUntilBoundedDeadline()
+	{
+		startEngineRequest();
+		RouteEdge canoeEdge = new RouteEdge(0, A, B, RouteEdge.Kind.CANOE);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(canoeEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.CANOE, RouteInteraction.Status.AVAILABLE,
+			"Chop-down", true, 12166, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult chop = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(6_001, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertTrue(chop.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, chop.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals("interaction-command-in-flight", transit.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void teleportationPortalRetainsRemoteOwnershipUntilBoundedDeadline()
+	{
+		startEngineRequest();
+		RouteEdge portalEdge = new RouteEdge(0, A, B,
+			RouteEdge.Kind.TELEPORTATION_PORTAL);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(portalEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.TELEPORTATION_PORTAL,
+			RouteInteraction.Status.AVAILABLE, "Enter", true, 40474, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult enter = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(6_001, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertTrue(enter.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, enter.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals("interaction-command-in-flight", transit.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void minigameTeleportRetainsRemoteOwnershipUntilBoundedDeadline()
+	{
+		startEngineRequest();
+		RouteEdge teleportEdge = new RouteEdge(0, A, B,
+			RouteEdge.Kind.MINIGAME_TELEPORT);
+		RoutePlan plan = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(teleportEdge, new RouteEdge(1, B, C, RouteEdge.Kind.WALK)));
+		RouteInteraction available = new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.MINIGAME_TELEPORT,
+			RouteInteraction.Status.AVAILABLE, "minigame-teleport", true,
+			-1, A, B);
+		RouteInteraction hidden = available.withStatus(
+			RouteInteraction.Status.AVAILABLE, false);
+		AtomicInteger interactions = new AtomicInteger();
+		AtomicInteger clicks = new AtomicInteger();
+		WalkerActions actions = new WalkerActions()
+		{
+			@Override
+			public boolean clickTile(WorldPoint target)
+			{
+				clicks.incrementAndGet();
+				return true;
+			}
+
+			@Override
+			public boolean interact(RouteInteraction interaction)
+			{
+				interactions.incrementAndGet();
+				return true;
+			}
+		};
+
+		NavigationExecutionResult enter = NavigationEngineRuntime.execute(
+			observation(1, A, plan, false, false).withRouteInteraction(available), actions);
+		NavigationExecutionResult transit = NavigationEngineRuntime.execute(
+			observation(6_001, A, plan, false, false).withRouteInteraction(hidden), actions);
+		NavigationExecutionResult deadline = NavigationEngineRuntime.execute(
+			observation(30_002, A, plan, false, false).withRouteInteraction(hidden), actions);
+
+		assertTrue(enter.isEngineOwned());
+		assertEquals(NavigationDecision.Type.INTERACT, enter.getDecision().getType());
+		assertEquals(NavigationDecision.Type.WAIT, transit.getDecision().getType());
+		assertEquals("interaction-command-in-flight", transit.getDecision().getReason());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, deadline.getDecision().getType());
+		assertEquals("approach-interaction-origin", deadline.getDecision().getReason());
+		assertEquals(1, interactions.get());
+		assertEquals(1, clicks.get());
+	}
+
+	@Test
+	public void failedUnsupportedRequestCannotResumeOnLaterGeneration()
+	{
+		startEngineRequest();
+		NavigationEngineRuntime.execute(observation(1, A, transportPlan(1), false, false),
+			target -> true);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(2), false, false), target -> true);
+
+		assertTrue(result.isEngineOwned());
+		assertEquals(NavigationDecision.Type.NO_ACTION, result.getDecision().getType());
+		assertFalse(NavigationEngineRuntime.isExecutionActive());
+	}
+
+	@Test
+	public void engineRouteCannotBecomeTransportRouteMidRequest()
+	{
+		startEngineRequest();
+		NavigationEngineRuntime.execute(observation(1, A, ordinaryPlan(1), false, false),
+			target -> true);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(2, B, transportPlan(2), false, false), target -> true);
+
+		assertEquals(NavigationDecision.Type.FAIL, result.getDecision().getType());
+		assertEquals(NavigationPhase.FAILED, NavigationEngineRuntime.getSnapshot().getPhase());
+	}
+
+	@Test
+	public void routeReplacementWhileClickIsInFlightUsesOnlyNewGeneration()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions actions = target -> {
+			commands.incrementAndGet();
+			return true;
+		};
+		NavigationEngineRuntime.execute(observation(1, A, ordinaryPlan(1), false, false), actions);
+
+		NavigationExecutionResult replacement = NavigationEngineRuntime.execute(
+			observation(2, A, ordinaryPlan(2), false, false), actions);
+
+		assertEquals(2, NavigationEngineRuntime.getSnapshot().getGeneration());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, replacement.getDecision().getType());
+		assertEquals(2, commands.get());
+	}
+
+	@Test
+	public void cancellationDuringMovementPreventsFurtherCommands()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		WalkerActions actions = target -> {
+			commands.incrementAndGet();
+			return true;
+		};
+		NavigationEngineRuntime.execute(observation(1, A, ordinaryPlan(1), false, false), actions);
+
+		NavigationEngineRuntime.cancel("test-cancel-during-movement");
+		NavigationExecutionResult after = NavigationEngineRuntime.execute(
+			observation(2, B, ordinaryPlan(1), true, false), actions);
+
+		assertEquals(NavigationDecision.Type.NO_ACTION, after.getDecision().getType());
+		assertEquals(NavigationPhase.CANCELLED, NavigationEngineRuntime.getSnapshot().getPhase());
+		assertEquals(1, commands.get());
+	}
+
+	@Test
+	public void displacementRequestsReplanWithoutInput()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(1, new WorldPoint(3300, 3300, 0), ordinaryPlan(1), false, false),
+			target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, result.getDecision().getType());
+		assertEquals(0, commands.get());
+	}
+
+	@Test
+	public void partialRouteReplansAndEmptyRouteFailsWithoutInput()
+	{
+		startEngineRequest();
+		AtomicInteger commands = new AtomicInteger();
+		RoutePlan partial = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B), Arrays.asList(A, B), false);
+		NavigationEngineRuntime.execute(observation(1, B, partial, false, false),
+			target -> {
+				commands.incrementAndGet();
+				return true;
+			});
+		NavigationExecutionResult partialResult = NavigationEngineRuntime.execute(
+			observation(2, B, partial, false, false), target -> true);
+
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN,
+			partialResult.getDecision().getType());
+		assertEquals(0, commands.get());
+
+		NavigationEngineRuntime.resetForTesting();
+		startEngineRequest();
+		RoutePlan empty = new RoutePlan(21, 1, A, Collections.singleton(C),
+			Collections.emptyList(), Collections.emptyList(), false);
+		NavigationExecutionResult emptyResult = NavigationEngineRuntime.execute(
+			observation(3, A, empty, false, false), target -> true);
+		assertTrue(emptyResult.isEngineOwned());
+		assertEquals(NavigationDecision.Type.FAIL, emptyResult.getDecision().getType());
+		assertEquals(NavigationPhase.UNREACHABLE, NavigationEngineRuntime.getSnapshot().getPhase());
+	}
+
+	@Test
+	public void straightDiagonalCorneredAndDoubledBackRoutesAreEligible()
+	{
+		WorldPoint d = new WorldPoint(3201, 3201, 0);
+		WorldPoint e = new WorldPoint(3200, 3201, 0);
+		assertTrue(new RoutePlan(1, 1, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, C), true).isOrdinaryWalkOnly());
+		assertTrue(new RoutePlan(1, 1, A, Collections.singleton(d),
+			Arrays.asList(A, d), Arrays.asList(A, d), true).isOrdinaryWalkOnly());
+		assertTrue(new RoutePlan(1, 1, A, Collections.singleton(e),
+			Arrays.asList(A, B, d, e), Arrays.asList(A, B, d, e), true).isOrdinaryWalkOnly());
+		assertTrue(new RoutePlan(1, 1, A, Collections.singleton(B),
+			Arrays.asList(A, B, d, e, A, B), Arrays.asList(A, d, A, B), true)
+			.isOrdinaryWalkOnly());
+	}
+
+	@Test
+	public void doubledBackRouteStartsFromEarliestMatchingAnchor()
+	{
+		WorldPoint d = new WorldPoint(3201, 3201, 0);
+		WorldPoint e = new WorldPoint(3200, 3201, 0);
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(B), 0, options, "folded-route-test"));
+		RoutePlan folded = new RoutePlan(21, 1, A, Collections.singleton(B),
+			Arrays.asList(A, B, d, e, A, B), Arrays.asList(A, d, A, B), true);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(1, A, folded, false, false), target -> true);
+
+		assertEquals(NavigationDecision.Type.CLICK_TILE, result.getDecision().getType());
+		assertEquals(e, result.getDecision().getTarget());
+		assertEquals(3, result.getDecision().getTargetRawIndex());
+		assertEquals("raw-route-lookahead", result.getDecision().getTargetSelection());
+		assertEquals(0, NavigationEngineRuntime.getSnapshot().getRawProgressIndex());
+	}
+
+	@Test
+	public void combatDisplacementReplansWithoutWaitingForCombatToEnd()
+	{
+		startEngineRequest();
+		WorldPoint displaced = new WorldPoint(3300, 3300, 0);
+		NavigationObservation inCombat = NavigationObservation.route(1, displaced, ordinaryPlan(1),
+			false, true, true, false, false, false, "combat-displacement");
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(inCombat, target -> true);
+
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, result.getDecision().getType());
+		assertEquals(RecoveryCause.OFF_ROUTE, result.getDecision().getRecoveryCause());
+	}
+
+	@Test
+	public void offRouteWalkerDestinationStillOwnsMovementInFlight()
+	{
+		startEngineRequest();
+		NavigationExecutionResult first = NavigationEngineRuntime.execute(
+			observation(1, A, ordinaryPlan(1), false, false), target -> true);
+		WorldPoint displaced = new WorldPoint(3300, 3300, 0);
+
+		NavigationExecutionResult result = NavigationEngineRuntime.execute(
+			observation(2, displaced, ordinaryPlan(1), true, false)
+				.withMovementDestination(first.getDecision().getTarget()), target -> true);
+
+		assertEquals(NavigationDecision.Type.WAIT, result.getDecision().getType());
+		assertEquals("off-route-movement-in-flight", result.getDecision().getReason());
+		assertEquals(0, NavigationEngineRuntime.getSnapshot().getRecoveryAttempts());
+	}
+
+	@Test
+	public void weissFallsReplanFromEarlierStagesWithoutAnotherLaterObstacleClick()
+	{
+		WorldPoint[] origins = {new WorldPoint(2855, 3964, 0), new WorldPoint(2853, 3961, 0)};
+		WorldPoint[] destinations = {new WorldPoint(2853, 3961, 0), new WorldPoint(2857, 3961, 0)};
+		WorldPoint[] falls = {new WorldPoint(2852, 3966, 0), new WorldPoint(2855, 3964, 0)};
+		int[] ids = {33328, 33190};
+		for (int i = 0; i < origins.length; i++)
+		{
+			NavigationEngineRuntime.resetForTesting();
+			WorldPoint from = origins[i];
+			WorldPoint to = destinations[i];
+			NavigationEngineRuntime.ensureRequest(new NavigationRequest(21, Collections.singleton(to), 0,
+				new NavigationRouteOptions(true, true, false), "weiss-failure-test"));
+			RoutePlan plan = new RoutePlan(21, 1, from, Collections.singleton(to),
+				Arrays.asList(from, to), Arrays.asList(from, to), true,
+				Collections.singletonList(new RouteEdge(0, from, to, RouteEdge.Kind.CATALOG_TRANSITION)));
+			RouteInteraction interaction = new RouteInteraction(1, 0, from, to, from,
+				RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+				i == 0 ? "Climb" : "Cross", true, ids[i], from, to);
+			AtomicInteger commands = new AtomicInteger();
+			WalkerActions actions = new WalkerActions()
+			{
+				@Override public boolean clickTile(WorldPoint point) { return true; }
+				@Override public boolean interact(RouteInteraction pending) { commands.incrementAndGet(); return true; }
+			};
+			assertEquals(NavigationDecision.Type.INTERACT, NavigationEngineRuntime.execute(
+				observation(1, from, plan, false, false).withRouteInteraction(interaction), actions).getDecision().getType());
+			NavigationExecutionResult fallen = NavigationEngineRuntime.execute(
+				observation(2, falls[i], plan, false, false).withRouteInteraction(
+					interaction.withStatus(RouteInteraction.Status.UNAVAILABLE, false)), actions);
+			assertEquals(NavigationDecision.Type.REQUEST_REPLAN, fallen.getDecision().getType());
+			assertEquals("interaction-displaced-behind-origin", fallen.getDecision().getReason());
+			assertEquals(1, commands.get());
+		}
+	}
+
+	private static void startEngineRequest()
+	{
+		NavigationRouteOptions options = new NavigationRouteOptions(true, true, false);
+		NavigationEngineRuntime.ensureRequest(new NavigationRequest(21,
+			Collections.singleton(C), 0, options, "phase-3-test"));
+	}
+
+	private static NavigationObservation observation(long time, WorldPoint player, RoutePlan plan,
+		boolean moving, boolean replan)
+	{
+		return NavigationObservation.route(time, player, plan, moving, false, false,
+			false, false, replan, "phase-3-test");
+	}
+
+	private static RoutePlan ordinaryPlan(long generation)
+	{
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, C), true);
+	}
+
+	private static RoutePlan transportPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.TRANSPORT);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RoutePlan adjacentTransportPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.ADJACENT_TRANSPORT);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RoutePlan catalogTransitionPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, UP, RouteEdge.Kind.CATALOG_TRANSITION);
+		RouteEdge second = new RouteEdge(1, UP, UP_TARGET, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(UP_TARGET),
+			Arrays.asList(A, UP, UP_TARGET), Arrays.asList(A, UP, UP_TARGET), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RoutePlan simpleTeleportPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.SIMPLE_TELEPORT);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RoutePlan npcTransportPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.NPC_TRANSPORT);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RoutePlan charterShipPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.CHARTER_SHIP);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RouteInteraction charterInteraction(String action, boolean ready)
+	{
+		return new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.CHARTER_SHIP, RouteInteraction.Status.AVAILABLE,
+			action, ready, 9318, A, B);
+	}
+
+	private static RoutePlan fairyRingPlan(long generation)
+	{
+		RouteEdge first = new RouteEdge(0, A, B, RouteEdge.Kind.FAIRY_RING);
+		RouteEdge second = new RouteEdge(1, B, C, RouteEdge.Kind.WALK);
+		return new RoutePlan(21, generation, A, Collections.singleton(C),
+			Arrays.asList(A, B, C), Arrays.asList(A, B, C), true,
+			Arrays.asList(first, second));
+	}
+
+	private static RouteInteraction fairyRingInteraction(String action, boolean ready)
+	{
+		return new RouteInteraction(1, 0, A, B, A,
+			RouteInteraction.Kind.FAIRY_RING, RouteInteraction.Status.AVAILABLE,
+			action, ready, 6563, A, B);
+	}
+}

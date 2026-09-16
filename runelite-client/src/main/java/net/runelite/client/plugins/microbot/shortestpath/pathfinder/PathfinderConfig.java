@@ -7,6 +7,7 @@ import net.runelite.api.*;
 import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.plugins.itemcharges.ItemChargeConfig;
 import net.runelite.client.plugins.microbot.Microbot;
@@ -24,9 +25,14 @@ import net.runelite.client.plugins.microbot.util.magic.RuneFilter;
 import net.runelite.client.plugins.microbot.util.magic.Runes;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.leaguetransport.Rs2LeaguesTransport;
+import net.runelite.client.plugins.microbot.util.leaguetransport.SeasonalTransportHandlers;
 import net.runelite.client.plugins.microbot.util.poh.PohTeleports;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
 import net.runelite.client.plugins.microbot.util.walker.WebWalkLog;
+import net.runelite.client.plugins.microbot.util.walker.transport.CatalogTransitionPolicy;
+import net.runelite.client.plugins.microbot.util.walker.transport.CerberusWinchPolicy;
+import net.runelite.client.plugins.microbot.util.walker.transport.NpcDialogueTransportPolicy;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -63,6 +69,20 @@ public class PathfinderConfig {
 	private static final WorldPoint SPIRIT_TREE_PORT_SARIM = new WorldPoint(3058, 3257, 0);
 	private static final WorldPoint SPIRIT_TREE_HOSIDIUS = new WorldPoint(1693, 3540, 0);
 	private static final WorldPoint SPIRIT_TREE_FARMING_GUILD = new WorldPoint(1251, 3750, 0);
+	private static final Set<Integer> MEIYERDITCH_FLOORBOARD_IDS = Set.of(
+		18070, 18071, 18072, 18073, 18089, 18090, 18093, 18094, 18097, 18098,
+		18109, 18110, 18111, 18112, 18113, 18114, 18117, 18118);
+	private static final Set<Integer> MEIYERDITCH_FLOOR_IDS = Set.of(
+		18129, 18130, 18132, 18133, 18135, 18136);
+	private static final Set<Integer> MEIYERDITCH_COURSE_IDS = Set.of(
+		17958, 17959, 17960, 18037, 18038, 18078, 18086, 18087, 18088,
+		18095, 18096, 18099, 18100, 18105, 18106, 18107, 18108);
+	private static final Set<Integer> MEIYERDITCH_PREPARED_FLOOR_IDS = Set.of(18122, 18124);
+	private static final Set<Integer> MEIYERDITCH_TUNNEL_IDS = Set.of(18083, 18085);
+	private final Set<WorldPoint> unavailableSpiritTreeDestinations = ConcurrentHashMap.newKeySet();
+	private final Set<WorldPoint> unavailableGnomeGliderDestinations = ConcurrentHashMap.newKeySet();
+	private final Set<WorldPoint> unavailableMagicMushtreeDestinations = ConcurrentHashMap.newKeySet();
+	private volatile Set<WorldPoint> unavailableFossilCampDestinations = Collections.emptySet();
 	private static final Set<Long> STATIC_BLOCKED_EDGES_PACKED = loadStaticBlockedEdgesFromResources();
 	// Tiles within 1 of an aggressive-NPC hazard tile (the melee-aggro ring). Stepping onto one
 	// gets a high pathfinding penalty when avoidDangerousNpcs is on, so paths keep >=2 tiles away.
@@ -218,6 +238,7 @@ public class PathfinderConfig {
     // global state cache never retains zero-valued varps — ~115 varp-gated rows accounted for
     // ~2.3s of the 2.8s refilter. Captured in the same client-thread block as boosted levels.
     private Map<Integer, Integer> refreshVarplayerValues;
+	private CerberusWinchPolicy.AccessSnapshot refreshCerberusWinchAccess;
     private static final Skill[] SKILLS = Skill.values();
 
     /**
@@ -453,7 +474,7 @@ public class PathfinderConfig {
                 && !QuestState.NOT_STARTED.equals(Rs2Player.getQuestState(Quest.FAIRYTALE_II__CURE_A_QUEEN))
                 && (Rs2Inventory.contains(ItemID.DRAMEN_STAFF, ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF)
                 || Rs2Equipment.isWearing(ItemID.DRAMEN_STAFF, ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF)
-                || (ShortestPathPlugin.getPathfinderConfig().useBankItems && (Rs2Bank.hasItem(ItemID.DRAMEN_STAFF) || Rs2Bank.hasItem(ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF)))
+                || (Rs2PathApi.getPathfinderConfig().useBankItems && (Rs2Bank.hasItem(ItemID.DRAMEN_STAFF) || Rs2Bank.hasItem(ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF)))
                 || Microbot.getVarbitValue(VarbitID.LUMBRIDGE_DIARY_ELITE_COMPLETE) == 1);
         useGnomeGliders = ShortestPathPlugin.override("useGnomeGliders", config.useGnomeGliders())
                 && QuestState.FINISHED.equals(Rs2Player.getQuestState(Quest.THE_GRAND_TREE));
@@ -552,16 +573,26 @@ public class PathfinderConfig {
         List<int[]> varbitConditions = new ArrayList<>();
         Set<Integer> varplayerIds = new HashSet<>();
         List<int[]> varplayerConditions = new ArrayList<>();
+        if (usePoh) {
+            for (int id : net.runelite.client.plugins.microbot.util.poh.data.NexusPortal.respawnSelectionVarbits()) {
+                varbitIds.add(id);
+                varbitConditions.add(new int[]{id, TransportVarbit.Operator.EQUAL.ordinal(), 1});
+            }
+        }
         // Skills that some transport actually gates on (see hasRequiredLevels: a level > 0 is a
         // requirement). Only these may participate in the verification hash — otherwise hitpoints
         // regenerating invalidates the whole transport cache.
         Set<Integer> requiredSkillOrdinals = new HashSet<>();
+		boolean hasCerberusWinchRows = false;
         // Item ids / currency names some transport or restriction gates on — everything else is
         // excluded from the cache key so ordinary inventory churn stops forcing a cold start.
         Set<Integer> relevantItemIds = new HashSet<>();
         Set<String> relevantCurrencyNames = new HashSet<>();
         for (Set<Transport> ts : mergedList.values()) {
             for (Transport t : ts) {
+				if (CerberusWinchPolicy.isEligible(t)) {
+					hasCerberusWinchRows = true;
+				}
                 t.getVarbits().forEach(v -> {
                     varbitIds.add(v.getVarbitId());
                     varbitConditions.add(new int[]{v.getVarbitId(), v.getOperator().ordinal(), v.getValue()});
@@ -578,13 +609,17 @@ public class PathfinderConfig {
                         }
                     }
                 }
-                if (t.getItemIdRequirements() != null) {
-                    t.getItemIdRequirements().stream()
+                if (TransportRequirementPolicy.itemIdRequirements(t) != null) {
+                    TransportRequirementPolicy.itemIdRequirements(t).stream()
                             .filter(Objects::nonNull)
                             .forEach(relevantItemIds::addAll);
                 }
-                if (t.getCurrencyAmount() > 0 && t.getCurrencyName() != null && !t.getCurrencyName().isEmpty()) {
-                    relevantCurrencyNames.add(t.getCurrencyName());
+				relevantItemIds.addAll(
+						TransportRequirementPolicy.additionalReusableItemIds(t));
+                int currencyAmount = TransportRequirementPolicy.currencyAmount(t);
+                String currencyName = TransportRequirementPolicy.currencyName(t);
+                if (currencyAmount > 0 && currencyName != null && !currencyName.isEmpty()) {
+                    relevantCurrencyNames.add(currencyName);
                 }
             }
         }
@@ -621,9 +656,17 @@ public class PathfinderConfig {
         transportRelevantItemIds = allCurrenciesResolved
                 ? Collections.unmodifiableSet(relevantItemIds)
                 : null;
+		if (hasCerberusWinchRows) {
+			varplayerIds.add(VarPlayerID.SLAYER_TARGET);
+			varbitIds.add(VarbitID.SLAYER_TARGET_BOSSID);
+			refreshCerberusWinchAccess = CerberusWinchPolicy.AccessSnapshot.unavailable();
+		} else {
+			refreshCerberusWinchAccess = null;
+		}
 
         refreshBoostedLevels = new int[SKILLS.length];
         Map<Integer, Integer> varplayerValues = new HashMap<>();
+		final boolean captureCerberusAccess = hasCerberusWinchRows;
         Microbot.getClientThread().runOnClientThreadOptional(() -> {
             for (int i = 0; i < SKILLS.length; i++) {
                 refreshBoostedLevels[i] = client.getBoostedSkillLevel(SKILLS[i]);
@@ -636,9 +679,20 @@ public class PathfinderConfig {
             for (int id : varplayerIds) {
                 varplayerValues.put(id, client.getVarpValue(id));
             }
+			if (captureCerberusAccess) {
+				refreshCerberusWinchAccess = CerberusWinchPolicy.readAccessSnapshot(client);
+			}
             return true;
         });
         refreshVarplayerValues = varplayerValues;
+		if (refreshCerberusWinchAccess != null) {
+			varplayerConditions.add(new int[]{VarPlayerID.SLAYER_TARGET,
+				TransportVarPlayer.Operator.EQUAL.ordinal(),
+				refreshCerberusWinchAccess.getTaskTargetId()});
+			varbitConditions.add(new int[]{VarbitID.SLAYER_TARGET_BOSSID,
+				TransportVarbit.Operator.EQUAL.ordinal(),
+				refreshCerberusWinchAccess.getBossTargetId()});
+		}
         long cacheTime = System.currentTimeMillis() - cacheStart;
 
         long filterStart = System.currentTimeMillis();
@@ -657,7 +711,6 @@ public class PathfinderConfig {
             Set<Transport> usableTransports = new HashSet<>(entry.getValue().size());
             for (Transport transport : entry.getValue()) {
                 totalTransports++;
-                updateActionBasedOnQuestState(transport);
 
                 long t0 = System.nanoTime();
                 boolean usable = useTransport(transport);
@@ -729,6 +782,7 @@ public class PathfinderConfig {
         refreshBoostedLevels = null;
         refreshCurrencyCache = null;
         refreshVarplayerValues = null;
+		refreshCerberusWinchAccess = null;
 
         // varbit/varplayer counts = distinct ids referenced by merged transport definitions this refresh, not total client var space.
         WebWalkLog.cfg("refresh_transports merge={}ms cache={}ms filter={}ms useTrans={}ms similar={}ms total/chk={}/{} usablePost={} vb={} vp={}",
@@ -1082,6 +1136,61 @@ public class PathfinderConfig {
         transportRefreshSnapshots.clear();
     }
 
+	/** Called on the client thread with a complete dialogue snapshot; later menus can unlock routes. */
+	public boolean recordFossilRowboatMenu(WorldPoint player, List<String> options) {
+		Set<WorldPoint> missing = NpcDialogueTransportPolicy.missingFossilCampDestinations(player, options);
+		if (missing == null || missing.equals(unavailableFossilCampDestinations)) {
+			return false;
+		}
+		unavailableFossilCampDestinations = missing;
+		invalidateTransportRefreshCache();
+		return true;
+	}
+
+	public boolean isFossilRowboatRouteEnabled(WorldPoint origin, WorldPoint destination) {
+		return !NpcDialogueTransportPolicy.FOSSIL_CAMP.equals(origin)
+			|| !unavailableFossilCampDestinations.contains(destination);
+	}
+
+	/** Login-screen reset prevents one account's observed locks affecting another account. */
+	public void clearFossilRowboatMenu() {
+		unavailableFossilCampDestinations = Collections.emptySet();
+		invalidateTransportRefreshCache();
+	}
+
+	/**
+	 * Excludes a destination that the live spirit-tree menu rendered as locked for this session.
+	 * Both incoming and outgoing network edges are filtered on the next transport refresh.
+	 */
+	public boolean markSpiritTreeDestinationUnavailable(WorldPoint destination) {
+		if (destination == null || !unavailableSpiritTreeDestinations.add(destination)) {
+			return false;
+		}
+		invalidateTransportRefreshCache();
+		WebWalkLog.cfg("spirit_tree_unavailable destination={}", destination);
+		return true;
+	}
+
+	/** Excludes both directions of a destination hidden on the live glider map. */
+	public boolean markGnomeGliderDestinationUnavailable(WorldPoint destination) {
+		if (destination == null || !unavailableGnomeGliderDestinations.add(destination)) {
+			return false;
+		}
+		invalidateTransportRefreshCache();
+		WebWalkLog.cfg("gnome_glider_unavailable destination={}", destination);
+		return true;
+	}
+
+	/** Excludes both directions of a destination labelled as undiscovered on the live mushtree map. */
+	public boolean markMagicMushtreeDestinationUnavailable(WorldPoint destination) {
+		if (destination == null || !unavailableMagicMushtreeDestinations.add(destination)) {
+			return false;
+		}
+		invalidateTransportRefreshCache();
+		WebWalkLog.cfg("magic_mushtree_unavailable destination={}", destination);
+		return true;
+	}
+
     /**
      * Rebuilds base transport definitions from packaged TSV resources and swaps them into {@link #allTransports}.
      * The next {@link #refresh(WorldPoint)} will use the reloaded definitions.
@@ -1245,11 +1354,33 @@ public class PathfinderConfig {
     }
 
     private boolean useTransport(Transport transport) {
+		if (CerberusWinchPolicy.isEligible(transport)
+				&& !cerberusWinchAccessAvailable()) return false;
+		if (CatalogTransitionPolicy.isEquippedGrappleShortcut(transport)
+				&& !TransportRequirementPolicy.grappleEquipmentReady()) return false;
+		if (CatalogTransitionPolicy.isAuditedHazardTransition(transport)
+				&& transport.getObjectId() == 25274
+				&& !TransportRequirementPolicy.noFollower()) return false;
+        if (!TransportRequirementPolicy.questVariantAvailable(transport)) {
+            return false;
+        }
+        if (transport.getType() == TransportType.BOAT && transport.getObjectId() == 30914
+                && !isFossilRowboatRouteEnabled(transport.getOrigin(), transport.getDestination())) {
+            return false;
+        }
         // Check if the feature flag is disabled
         if (!isFeatureEnabled(transport)) {
             log.debug("Transport Type {} is disabled by feature flag", transport.getType());
             return false;
         }
+		// Do not publish a seasonal edge unless the walker has an executor for that exact
+		// row shape. A config toggle alone previously admitted every packaged League row,
+		// including rows that could only fail and be selected again on the next replan.
+		if (transport.getType() == TransportType.SEASONAL_TRANSPORT
+				&& !SeasonalTransportHandlers.isAvailable(transport)) {
+			log.debug("Seasonal transport ( D: {} ) has no registered executor", transport.getDestination());
+			return false;
+		}
         // If the transport requires you to be in a members world (used for more granular member requirements)
         if (transport.isMembers() && !client.getWorldType().contains(WorldType.MEMBERS)) {
             log.debug("Transport ( O: {} D: {} ) requires members world", transport.getOrigin(), transport.getDestination());
@@ -1259,6 +1390,18 @@ public class PathfinderConfig {
             log.debug("Transport ( O: {} D: {} ) is a spirit tree route but the tree is disabled", transport.getOrigin(), transport.getDestination());
             return false;
         }
+		if (transport.getType() == TransportType.GNOME_GLIDER
+				&& !isGnomeGliderRouteEnabled(transport)) {
+			log.debug("Transport ( O: {} D: {} ) is a gnome glider route but the destination is unavailable",
+				transport.getOrigin(), transport.getDestination());
+			return false;
+		}
+		if (isMagicMushtreeTransport(transport)
+				&& !isMagicMushtreeRouteEnabled(transport)) {
+			log.debug("Transport ( O: {} D: {} ) is a Magic Mushtree route but the destination is unavailable",
+				transport.getOrigin(), transport.getDestination());
+			return false;
+		}
         // If you don't meet level requirements
         if (!hasRequiredLevels(transport)) {
             log.debug("Transport ( O: {} D: {} ) requires skill levels {}", transport.getOrigin(), transport.getDestination(), Arrays.toString(transport.getSkillLevels()));
@@ -1283,20 +1426,22 @@ public class PathfinderConfig {
         }
 
         // If you don't have the required currency & amount for transport
-        if (transport.getCurrencyAmount() > 0) {
+        int currencyAmount = TransportRequirementPolicy.currencyAmount(transport);
+        String currencyName = TransportRequirementPolicy.currencyName(transport);
+        if (currencyAmount > 0) {
             if (refreshCurrencyCache != null) {
-                int[] cached = refreshCurrencyCache.computeIfAbsent(transport.getCurrencyName(), name -> {
+                int[] cached = refreshCurrencyCache.computeIfAbsent(currencyName, name -> {
                     int invCount = Rs2Inventory.itemQuantity(name);
                     int bankCount = useBankItems ? Rs2Bank.count(name) : 0;
                     return new int[]{invCount, bankCount};
                 });
-                if (cached[0] < transport.getCurrencyAmount() && cached[1] < transport.getCurrencyAmount()) {
-                    log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
+                if (cached[0] < currencyAmount && cached[1] < currencyAmount) {
+                    log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), currencyAmount, currencyName);
                     return false;
                 }
-            } else if (!Rs2Inventory.hasItemAmount(transport.getCurrencyName(), transport.getCurrencyAmount())
-                    && !(useBankItems && Rs2Bank.count(transport.getCurrencyName()) >= transport.getCurrencyAmount())) {
-                log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), transport.getCurrencyAmount(), transport.getCurrencyName());
+            } else if (!Rs2Inventory.hasItemAmount(currencyName, currencyAmount)
+                    && !(useBankItems && Rs2Bank.count(currencyName) >= currencyAmount)) {
+                log.debug("Transport ( O: {} D: {} ) requires {} x {}", transport.getOrigin(), transport.getDestination(), currencyAmount, currencyName);
                 return false;
             }
         }
@@ -1325,10 +1470,11 @@ public class PathfinderConfig {
         }
 
         // Used for Generic Item Requirements
-        if (!transport.getItemIdRequirements().isEmpty()) {
+        if (!TransportRequirementPolicy.itemIdRequirements(transport).isEmpty()
+				|| !TransportRequirementPolicy.additionalReusableItemIds(transport).isEmpty()) {
             boolean hasRequiredItems = hasRequiredItems(transport);
             if (!hasRequiredItems) {
-                log.debug("Transport ( O: {} D: {} ) requires items {}", transport.getOrigin(), transport.getDestination(), transport.getItemIdRequirements().stream().flatMap(Set::stream).collect(Collectors.toSet()));
+                log.debug("Transport ( O: {} D: {} ) requires items {}", transport.getOrigin(), transport.getDestination(), TransportRequirementPolicy.itemIdRequirements(transport).stream().flatMap(Set::stream).collect(Collectors.toSet()));
             }
             return hasRequiredItems;
         }
@@ -1336,15 +1482,20 @@ public class PathfinderConfig {
         return true;
     }
 
+	private boolean cerberusWinchAccessAvailable() {
+		CerberusWinchPolicy.AccessSnapshot snapshot = refreshCerberusWinchAccess;
+		return snapshot == null ? CerberusWinchPolicy.liveAccessAvailable()
+				: snapshot.isAvailable();
+	}
+
     /**
      * Same gating as the main {@link #refreshTransports} loop, for rows injected after the merge pass
-     * (Leagues catalog / Area teleports): quest action patch, {@link #useTransport}, {@link Rs2LeaguesTransport#isTransportAllowed}.
+     * (Leagues catalog / Area teleports): {@link #useTransport}, {@link Rs2LeaguesTransport#isTransportAllowed}.
      */
     public boolean isTransportUsableWithLeaguesContext(Transport transport, Rs2LeaguesTransport.LeaguesContext leaguesCtx) {
         if (transport == null || leaguesCtx == null) {
             return false;
         }
-        updateActionBasedOnQuestState(transport);
         if (!useTransport(transport)) {
             return false;
         }
@@ -1378,16 +1529,6 @@ public class PathfinderConfig {
             .allMatch(i -> Microbot.getClient().getBoostedSkillLevel(skills[i]) >= requiredLevels[i]);
     }
 
-    private void updateActionBasedOnQuestState(Transport transport) {
-        if (Objects.equals(transport.getType(), TransportType.SHIP) &&
-                (Objects.equals(transport.getName(), "Veos") || Objects.equals(transport.getName(), "Captain Magoro"))) {
-            QuestState questState = Rs2Player.getQuestState(Quest.CLIENT_OF_KOUREND);
-            if (questState != QuestState.FINISHED && !Objects.equals(transport.getAction(), "Talk-to")) {
-                transport.setAction("Talk-to");
-            }
-        }
-    }
-
     /**
      * Toggle for {@link #SPIRIT_TREE_DESTINATIONS_ORDERED}[{@code index}]. Must stay aligned with array length.
      */
@@ -1411,6 +1552,12 @@ public class PathfinderConfig {
     private boolean isSpiritTreeRouteEnabled(Transport transport) {
         WorldPoint origin = transport.getOrigin();
         WorldPoint destination = transport.getDestination();
+		for (WorldPoint unavailable : unavailableSpiritTreeDestinations) {
+			if ((destination != null && destination.equals(unavailable))
+					|| (origin != null && origin.distanceTo2D(unavailable) <= 5)) {
+				return false;
+			}
+		}
         for (int i = 0; i < SPIRIT_TREE_DESTINATIONS_ORDERED.length; i++) {
             if (!spiritTreeDestinationToggle(i)) {
                 WorldPoint toggledPoint = SPIRIT_TREE_DESTINATIONS_ORDERED[i];
@@ -1423,8 +1570,155 @@ public class PathfinderConfig {
         return true;
     }
 
+	private boolean isGnomeGliderRouteEnabled(Transport transport) {
+		WorldPoint origin = transport.getOrigin();
+		WorldPoint destination = transport.getDestination();
+		for (WorldPoint unavailable : unavailableGnomeGliderDestinations) {
+			if ((destination != null && destination.distanceTo2D(unavailable) <= 3)
+					|| (origin != null && origin.distanceTo2D(unavailable) <= 6)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean isMagicMushtreeRouteEnabled(Transport transport) {
+		WorldPoint origin = transport.getOrigin();
+		WorldPoint destination = transport.getDestination();
+		for (WorldPoint unavailable : unavailableMagicMushtreeDestinations) {
+			if ((destination != null && destination.distanceTo2D(unavailable) <= 3)
+					|| (origin != null && origin.distanceTo2D(unavailable) <= 5)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean isMagicMushtreeTransport(Transport transport) {
+		return transport.getType() == TransportType.MAGIC_MUSHTREE
+			|| (transport.getType() == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 30920 || transport.getObjectId() == 30924)
+				&& "Magic Mushtree".equalsIgnoreCase(transport.getName())
+				&& "Use".equalsIgnoreCase(transport.getAction()));
+	}
+
+	private static boolean isMeiyerditchCourseTransport(Transport transport) {
+		int objectId = transport.getObjectId();
+		if (!MEIYERDITCH_COURSE_IDS.contains(objectId)) return false;
+		String action = transport.getAction();
+		String name = transport.getName();
+		if (objectId == 17958) return "Jump-onto".equalsIgnoreCase(action)
+			&& "Rock".equalsIgnoreCase(name);
+		if (objectId == 17959) return "Climb-up".equalsIgnoreCase(action)
+			&& "Rock".equalsIgnoreCase(name);
+		if (objectId == 17960) return "Climb-down".equalsIgnoreCase(action)
+			&& "Rock".equalsIgnoreCase(name);
+		if (objectId == 18037 || objectId == 18038) return "Climb-over".equalsIgnoreCase(action)
+			&& "Wall rubble".equalsIgnoreCase(name);
+		if (objectId == 18078 || objectId == 18088) return "Crawl-under".equalsIgnoreCase(action)
+			&& "Wall".equalsIgnoreCase(name);
+		if (objectId == 18099 || objectId == 18100) return "Walk-across".equalsIgnoreCase(action)
+			&& "Washing line".equalsIgnoreCase(name);
+		return (objectId == 18086 || objectId == 18095 || objectId == 18105 || objectId == 18108
+			? "Climb-up" : "Climb-down").equalsIgnoreCase(action) && "Shelf".equalsIgnoreCase(name);
+	}
+
     private boolean isFeatureEnabled(Transport transport) {
         TransportType type = transport.getType();
+		// Ordinary TSV shadow rows still belong to their network's feature switch.
+		// Otherwise disabling the generated network leaves the same interaction usable.
+		if (isMagicMushtreeTransport(transport)) {
+			type = TransportType.MAGIC_MUSHTREE;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 12003 || transport.getObjectId() == 12094)
+				&& "Fairy ring".equalsIgnoreCase(transport.getName())
+				&& "Use".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.FAIRY_RING;
+		} else if (type == TransportType.TRANSPORT
+				&& transport.getObjectId() >= 3931 && transport.getObjectId() <= 3933
+				&& "Log balance".equalsIgnoreCase(transport.getName())
+				&& "Cross".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 21314 || transport.getObjectId() == 21315)
+				&& "Rope bridge".equalsIgnoreCase(transport.getName())
+				&& "Walk-across".equalsIgnoreCase(transport.getAction())) {
+				type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (CatalogTransitionPolicy.isAuditedShortcutTraversal(transport)
+					|| net.runelite.client.plugins.microbot.util.walker.transport.NorthernQuestShortcutPolicy.isWeiss(transport))) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT && transport.getObjectId() == 38574
+				&& CatalogTransitionPolicy.isAuditedMiscAccess(transport)) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 20882 || transport.getObjectId() == 20884
+						|| transport.getObjectId() == 21738 || transport.getObjectId() == 21739)
+				&& CatalogTransitionPolicy.isAuditedWaterAndBalance(transport)) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 2234 || transport.getObjectId() == 2236
+						|| transport.getObjectId() == 3922 || transport.getObjectId() == 3925)
+				&& CatalogTransitionPolicy.isAuditedHazardTransition(transport)) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& ((MEIYERDITCH_FLOORBOARD_IDS.contains(transport.getObjectId())
+						&& "Floorboards".equalsIgnoreCase(transport.getName())
+						&& "Jump-to".equalsIgnoreCase(transport.getAction()))
+					|| (MEIYERDITCH_FLOOR_IDS.contains(transport.getObjectId())
+						&& "Floor".equalsIgnoreCase(transport.getName())
+					&& "Walk-across".equalsIgnoreCase(transport.getAction())))) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT && isMeiyerditchCourseTransport(transport)) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& MEIYERDITCH_PREPARED_FLOOR_IDS.contains(transport.getObjectId())
+				&& "Floor".equalsIgnoreCase(transport.getName())
+				&& ("Climb-up".equalsIgnoreCase(transport.getAction())
+					|| "Climb-down".equalsIgnoreCase(transport.getAction()))) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& MEIYERDITCH_TUNNEL_IDS.contains(transport.getObjectId())
+				&& ("Tunnel".equalsIgnoreCase(transport.getName())
+					|| "Trapdoor tunnel".equalsIgnoreCase(transport.getName()))
+				&& "Climb-into".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT && transport.getObjectId() == 18054
+				&& "Barricade".equalsIgnoreCase(transport.getName())
+				&& "Open".equalsIgnoreCase(transport.getAction())) {
+				type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 39172 || transport.getObjectId() == 39173)
+				&& "Wall".equalsIgnoreCase(transport.getName())
+				&& ("Climb-up".equalsIgnoreCase(transport.getAction())
+					|| "Climb-down".equalsIgnoreCase(transport.getAction()))) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT && transport.getObjectId() == 30174
+				&& "Tunnel".equalsIgnoreCase(transport.getName())
+				&& "Enter".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT && transport.getObjectId() == 29326
+				&& "Gap".equalsIgnoreCase(transport.getName())
+				&& "Jump".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& (transport.getObjectId() == 27257 || transport.getObjectId() == 27258)
+				&& "Tunnel".equalsIgnoreCase(transport.getName())
+				&& "Use".equalsIgnoreCase(transport.getAction())) {
+			type = TransportType.AGILITY_SHORTCUT;
+		} else if (type == TransportType.TRANSPORT
+				&& ((transport.getObjectId() == 3522
+						&& "Bridge".equalsIgnoreCase(transport.getName())
+						&& "Jump".equalsIgnoreCase(transport.getAction()))
+					|| ((transport.getObjectId() == 11948 || transport.getObjectId() == 11949)
+						&& "Climbing rocks".equalsIgnoreCase(transport.getName())
+						&& "Climb".equalsIgnoreCase(transport.getAction()))
+					|| ((transport.getObjectId() == 19846 || transport.getObjectId() == 19847
+						|| transport.getObjectId() == 26405)
+						&& "Rocky handholds".equalsIgnoreCase(transport.getName())
+						&& "Climb".equalsIgnoreCase(transport.getAction())))) {
+			type = TransportType.AGILITY_SHORTCUT;
+		}
 
         if (!client.getWorldType().contains(WorldType.MEMBERS)) {
             // Transport types that require membership
@@ -1517,16 +1811,26 @@ public class PathfinderConfig {
     private boolean hasRequiredItems(Transport transport) {
         if (requiresChronicle(transport)) return hasChronicleCharges();
 
+		Set<Integer> additional = TransportRequirementPolicy.additionalReusableItemIds(transport);
+		Set<Set<Integer>> primaryRequirements =
+				TransportRequirementPolicy.itemIdRequirements(transport);
         if (refreshAvailableItemIds != null) {
-            return transport.getItemIdRequirements()
+			boolean primary = primaryRequirements.isEmpty() || primaryRequirements
                     .stream()
                     .flatMap(Collection::stream)
                     .anyMatch(refreshAvailableItemIds::contains);
+			return primary && (additional.isEmpty()
+					|| additional.stream().anyMatch(refreshAvailableItemIds::contains));
         }
-        return transport.getItemIdRequirements()
+		boolean primary = primaryRequirements.isEmpty() || primaryRequirements
                 .stream()
                 .flatMap(Collection::stream)
-                .anyMatch(itemId -> Rs2Equipment.isWearing(itemId) || Rs2Inventory.hasItem(itemId) || (ShortestPathPlugin.getPathfinderConfig().useBankItems && Rs2Bank.hasItem(itemId)));
+                .anyMatch(itemId -> Rs2Equipment.isWearing(itemId) || Rs2Inventory.hasItem(itemId) || (Rs2PathApi.getPathfinderConfig().useBankItems && Rs2Bank.hasItem(itemId)));
+		return primary && (additional.isEmpty() || additional.stream()
+				.anyMatch(itemId -> Rs2Equipment.isWearing(itemId)
+					|| Rs2Inventory.hasItem(itemId)
+					|| Rs2PathApi.getPathfinderConfig().useBankItems
+						&& Rs2Bank.hasItem(itemId)));
     }
 
     /**
@@ -1548,7 +1852,11 @@ public class PathfinderConfig {
                 : transport.getDisplayInfo();
         Rs2Spells rs2Spell = Rs2Magic.getRs2Spell(displayInfo);
         if (rs2Spell == null) return false;
-        return Rs2Magic.hasRequiredRunes(rs2Spell, RuneFilter.builder().includeBank(useBankItems).build());
+        if (Rs2Magic.hasRequiredRunes(rs2Spell, RuneFilter.builder().includeBank(useBankItems).build())) return true;
+        return (!useBankItems || config.walkWithBankedTransports() && config.useBankedElementalStaffs())
+                && net.runelite.client.plugins.microbot.util.walker.transport.SimpleTeleportPolicy.isEligible(transport)
+                && net.runelite.client.plugins.microbot.util.walker.banking.Rs2SpellEquipmentScene.plan(
+                        List.of(Rs2Magic.getRequiredRunes(rs2Spell, 1)), useBankItems) != null;
 //        return Rs2Magic.quickCanCast(displayInfo);
     }
 
@@ -1556,7 +1864,7 @@ public class PathfinderConfig {
      * Checks if the transport requires the Chronicle
      */
     private boolean requiresChronicle(Transport transport) {
-        return transport.getItemIdRequirements()
+        return TransportRequirementPolicy.itemIdRequirements(transport)
                 .stream()
                 .flatMap(Collection::stream)
                 .anyMatch(itemId -> itemId == ItemID.CHRONICLE);
@@ -1566,26 +1874,21 @@ public class PathfinderConfig {
      * Checks if the Chronicle has charges
      */
     private boolean hasChronicleCharges() {
-        if (!Rs2Equipment.isWearing(ItemID.CHRONICLE)) {
-            if (!Rs2Inventory.hasItem(ItemID.CHRONICLE))
-                return false;
-        }
+        boolean available = refreshAvailableItemIds != null
+                ? refreshAvailableItemIds.contains(ItemID.CHRONICLE)
+                : Rs2Equipment.isWearing(ItemID.CHRONICLE)
+                    || Rs2Inventory.hasItem(ItemID.CHRONICLE)
+                    || (useBankItems && Rs2Bank.hasItem(ItemID.CHRONICLE));
+        if (!available) return false;
 
         String charges = Microbot.getConfigManager()
                 .getRSProfileConfiguration(ItemChargeConfig.GROUP, ItemChargeConfig.KEY_CHRONICLE);
-
-        // If charges are unknown, attempt to retrieve them
-        if (charges == null || charges.isEmpty()) {
-            if (Rs2Inventory.hasItem(ItemID.CHRONICLE)) {
-                Rs2Inventory.interact(ItemID.CHRONICLE, "Check charges");
-            } else if (Rs2Equipment.isWearing(ItemID.CHRONICLE)) {
-                Rs2Equipment.interact(ItemID.CHRONICLE, "Check charges");
-            }
-            charges = Microbot.getConfigManager().getRSProfileConfiguration(ItemChargeConfig.GROUP, ItemChargeConfig.KEY_CHRONICLE);
+        if (charges == null) return false;
+        try {
+            return Integer.parseInt(charges.trim()) > 0;
+        } catch (NumberFormatException ignored) {
+            return false;
         }
-
-        // Validate charges
-        return charges != null && Integer.parseInt(charges) > 0;
     }
 
     @Deprecated(since = "1.6.2 - Add Restrictions to restrictions.tsv", forRemoval = true)
@@ -1873,6 +2176,8 @@ public class PathfinderConfig {
         int maxSimilar = config != null ? config.maxSimilarTransportDistance() : 0;
         return Objects.hash(
                 packTransportRefreshToggleBits(),
+                TransportRequirementPolicy.brokenRaftEquipmentReady(),
+                TransportRequirementPolicy.desertPassExempt(),
                 useTeleportationItems,
                 ignoreTeleportAndItems,
                 useBankItems,

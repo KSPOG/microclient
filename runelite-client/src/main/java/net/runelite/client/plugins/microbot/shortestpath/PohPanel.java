@@ -3,6 +3,7 @@ package net.runelite.client.plugins.microbot.shortestpath;
 
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.gameval.ObjectID;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.shortestpath.components.CheckboxPanel;
 import net.runelite.client.plugins.microbot.shortestpath.components.EnumListPanel;
@@ -186,15 +187,61 @@ public class PohPanel extends PluginPanel {
         }
         WorldPoint outsidePoint = location.getPortalLocation();
 
-        transportMap.put(null, Set.of(
-                new Transport(exitPortal, "Construction cape: Tele to POH", TransportType.TELEPORTATION_ITEM, true, 19, Set.of(Set.of(9789), Set.of(9790))),
-                new Transport(exitPortal, "Teleport to House", TransportType.TELEPORTATION_SPELL, true, 19, Map.of(Skill.MAGIC, 40)),
-                new Transport(exitPortal, "Teleport to House tablet: Inside", TransportType.TELEPORTATION_ITEM, true, 19, Set.of(Set.of(8013)))
-        ));
-        transportMap.put(outsidePoint, Set.of(
-                new Transport(outsidePoint, exitPortal, location.name() + " -> PoH", TransportType.TELEPORTATION_PORTAL, true, "Home", "Portal", location.getPortalId())
-        ));
+        Set<Transport> teleports = new HashSet<>();
+        teleports.add(new Transport(exitPortal, "Teleport to House tablet: Inside",
+                TransportType.TELEPORTATION_ITEM, true, 19, Set.of(Set.of(8013)), true));
+        for (int outside = 0; outside <= 1; outside++) {
+            WorldPoint landing = outside == 0 ? exitPortal : outsidePoint;
+            Transport cape = new Transport(landing, "Construction cape: Tele to POH",
+                    TransportType.TELEPORTATION_ITEM, true, 19, Set.of(Set.of(9789), Set.of(9790)));
+            Transport spell = new Transport(landing, "Teleport to House",
+                    TransportType.TELEPORTATION_SPELL, true, 19, Map.of(Skill.MAGIC, 40));
+            for (Transport teleport : Set.of(cape, spell)) {
+                teleport.getVarbits().add(new TransportVarbit(
+                        net.runelite.api.gameval.VarbitID.POH_TELE_TOGGLE, outside, TransportVarbit.Operator.EQUAL));
+                teleport.getVarbits().add(new TransportVarbit(
+                        net.runelite.api.gameval.VarbitID.POH_HOUSE_LOCATION,
+                        location.getVarbitValue(), TransportVarbit.Operator.EQUAL));
+                teleports.add(teleport);
+            }
+        }
+        transportMap.put(null, teleports);
+        mergeTransports(transportMap, createHouseEntryPortalTransport(exitPortal, location));
         return transportMap;
+    }
+
+    static Map<WorldPoint, Set<Transport>> createHouseEntryPortalTransport(
+            WorldPoint exitPortal, HouseLocation location) {
+        if (exitPortal == null || location == null) {
+            return Map.of();
+        }
+        WorldPoint outsidePoint = location.getPortalLocation();
+        return Map.of(outsidePoint, Set.of(
+                new Transport(outsidePoint, exitPortal, location.name() + " -> PoH",
+                        TransportType.POH, true, "Home", "Portal",
+                        location.getPortalId())
+        ));
+    }
+
+    static Map<WorldPoint, Set<Transport>> createHouseExitPortalTransport(
+            WorldPoint exitPortal, HouseLocation location) {
+        if (exitPortal == null || location == null) {
+            return Map.of();
+        }
+        WorldPoint outsidePoint = location.getPortalLocation();
+        return Map.of(exitPortal, Set.of(
+                new Transport(exitPortal, outsidePoint, "PoH -> " + location.name(),
+                        TransportType.POH, true, "Enter", "Portal",
+                        ObjectID.POH_EXIT_PORTAL)
+        ));
+    }
+
+    private static void mergeTransports(Map<WorldPoint, Set<Transport>> target,
+            Map<WorldPoint, Set<Transport>> additions) {
+        for (Map.Entry<WorldPoint, Set<Transport>> entry : additions.entrySet()) {
+            target.computeIfAbsent(entry.getKey(), ignored -> new HashSet<>())
+                    .addAll(entry.getValue());
+        }
     }
 
     /**
@@ -212,6 +259,12 @@ public class PohPanel extends PluginPanel {
             Microbot.log("Failed to load exit portal config");
             return allTransports;
         }
+
+        // This is an outgoing PoH edge, so it must be present even while the player is
+        // already inside. PathfinderConfig intentionally omits getTransportsToPoh() in
+        // that state to avoid offering teleports back into the same house.
+        mergeTransports(pohTransports,
+                createHouseExitPortalTransport(exitPortal, HouseLocation.getHouseLocation()));
 
         pohTeleports.addAll(instance.checkboxPanel.getTeleports());
         pohTeleports.addAll(instance.portalPanel.getTeleports());
@@ -236,7 +289,7 @@ public class PohPanel extends PluginPanel {
         }
         pohTransports.computeIfAbsent(exitPortal, p -> new HashSet<>()).addAll(pohTeleports.stream().map(
                 t -> new PohTransport(exitPortal, t)
-        ).collect(Collectors.toList()));
+        ).filter(t -> t.getDestination() != null).collect(Collectors.toList()));
 
         return pohTransports;
     }
@@ -270,7 +323,11 @@ public class PohPanel extends PluginPanel {
             Map<WorldPoint, Set<Transport>> transportsMap
     ) {
         //Only used to build actual transports (needs ORIGIN and DESTINATION same)
-        Transport pohSpiritTransport = new Transport(pohSpiritTree, pohSpiritTree, "C: Your house", SPIRIT_TREE, true, 5);
+        String coordinate = pohSpiritTree.getX() + " " + pohSpiritTree.getY() + " " + pohSpiritTree.getPlane();
+        Transport pohSpiritTransport = new Transport(Map.of(
+                "Origin", coordinate, "Destination", coordinate,
+                "menuOption menuTarget objectID", "Travel;Spirit tree;" + net.runelite.api.gameval.ObjectID.POH_SPIRIT_TREE,
+                "Display info", "C: Your house", "Duration", "5", "isMembers", "Y"), SPIRIT_TREE);
         return createTransportsToPoh(pohSpiritTransport, transportsMap);
     }
 
@@ -292,22 +349,31 @@ public class PohPanel extends PluginPanel {
         WorldPoint pohExitPortal = pohTempTransport.getOrigin();
         TransportType type = pohTempTransport.getType();
         Map<WorldPoint, Set<Transport>> newTransportsMap = new HashMap<>();
-        transportsMap.entrySet().stream()
-                .filter(e -> e.getValue().stream().anyMatch(t -> t.getType() == type)).findFirst().ifPresent(e -> {
-                    WorldPoint existingRingPoint = e.getKey();
-                    for (Transport existingRingTransport : new HashSet<>(e.getValue())) {
-                        if (existingRingTransport.getType() != type) continue;
-                        // add from poh
-                        newTransportsMap
-                                .computeIfAbsent(pohExitPortal, k -> new HashSet<>())
-                                .add(new Transport(pohTempTransport, existingRingTransport));
-
-                        // add to poh
-                        newTransportsMap
-                                .computeIfAbsent(existingRingPoint, k -> new HashSet<>())
-                                .add(new Transport(existingRingTransport, pohTempTransport));
-                    }
-                });
+        Map<WorldPoint, Transport> origins = new HashMap<>();
+        Map<WorldPoint, Transport> destinations = new HashMap<>();
+        for (Set<Transport> transports : transportsMap.values()) {
+            for (Transport transport : transports) {
+                if (transport.getType() != type) continue;
+                Transport origin = transport.getOriginEndpoint();
+                Transport destination = transport.getDestinationEndpoint();
+                if (origin.getOrigin() != null) {
+                    origins.putIfAbsent(origin.getOrigin(), origin);
+                }
+                if (destination.getDestination() != null) {
+                    destinations.putIfAbsent(destination.getDestination(), destination);
+                }
+            }
+        }
+        for (Map.Entry<WorldPoint, Transport> origin : origins.entrySet()) {
+            if (origin.getKey().equals(pohExitPortal)) continue;
+            newTransportsMap.computeIfAbsent(origin.getKey(), k -> new HashSet<>())
+                    .add(new Transport(origin.getValue(), pohTempTransport));
+        }
+        for (Map.Entry<WorldPoint, Transport> destination : destinations.entrySet()) {
+            if (destination.getKey().equals(pohExitPortal)) continue;
+            newTransportsMap.computeIfAbsent(pohExitPortal, k -> new HashSet<>())
+                    .add(new Transport(pohTempTransport, destination.getValue()));
+        }
 
         return newTransportsMap;
     }

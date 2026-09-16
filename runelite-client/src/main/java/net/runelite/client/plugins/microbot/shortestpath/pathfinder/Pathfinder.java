@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
+import net.runelite.client.plugins.microbot.shortestpath.TransportEdgeMatcher;
 import net.runelite.client.plugins.microbot.shortestpath.TransportType;
 import net.runelite.client.plugins.microbot.shortestpath.WorldPointUtil;
 import net.runelite.client.plugins.microbot.util.walker.WebWalkLog;
@@ -201,6 +202,21 @@ public class Pathfinder implements Runnable {
         return anchors;
     }
 
+    /** Whether the published raw edge coincides with an enabled explicit transport. */
+    public boolean isTransportEdge(WorldPoint from, WorldPoint to) {
+        if (from == null || to == null || config.getTransports() == null) {
+            return false;
+        }
+        Set<Transport> transports = config.getTransports().get(from);
+        return transports != null && transports.stream()
+                .anyMatch(transport -> to.equals(transport.getDestination()));
+    }
+
+    /** Enabled catalog rows matching one directed raw-path edge. */
+    public Set<Transport> getTransportsForEdge(WorldPoint from, WorldPoint to) {
+        return TransportEdgeMatcher.find(config.getTransports(), from, to);
+    }
+
     private void addNeighbors(Node node) {
         List<Node> nodes = map.getNeighbors(node, visited, config, targets);
         boolean afterTransport = node instanceof TransportNode;
@@ -266,8 +282,8 @@ public class Pathfinder implements Runnable {
 
     // --- Network-transport-aware heuristic ---------------------------------------------------
     //
-    // Network transports (fairy rings, spirit trees, gnome gliders, quetzals) are fully-connected
-    // hubs: reaching ANY origin lets you hop to ANY destination of that network for ~free. Plain
+    // Network transports (fairy rings, spirit trees, gliders, quetzals, carpets, balloons) form
+    // hubs: reaching an origin can hop toward a distant destination for ~free. Plain
     // Chebyshev is blind to this — a node next to the Ardougne fairy ring reads "~1350 tiles from
     // the Farming Guild" by straight line, so A* buries the (optimal) cloak->fairy->CIR chain under
     // a single direct teleport that the heuristic makes look closer. We fold the hubs into the
@@ -284,7 +300,8 @@ public class Pathfinder implements Runnable {
     // cascade it never zeroes the heuristic (so it can never collapse into a whole-map Dijkstra).
     private static final EnumSet<TransportType> NETWORK_HEURISTIC_TYPES = EnumSet.of(
             TransportType.FAIRY_RING, TransportType.SPIRIT_TREE,
-            TransportType.GNOME_GLIDER, TransportType.QUETZAL);
+            TransportType.GNOME_GLIDER, TransportType.QUETZAL,
+            TransportType.MAGIC_CARPET, TransportType.HOT_AIR_BALLOON);
 
     private int[] fwdLandmark = null;          // packed network origins (reach a hub -> hop toward target)
     private int[] fwdLandmarkResidual = null;  // parallel: that network's min(dest -> nearest target) Chebyshev

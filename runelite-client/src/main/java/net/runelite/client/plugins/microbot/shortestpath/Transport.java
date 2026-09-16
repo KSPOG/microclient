@@ -117,6 +117,9 @@ public class Transport {
     @Getter
     private boolean isMembers = false;
 
+    private Transport originEndpoint;
+    private Transport destinationEndpoint;
+
 
 
     /**
@@ -126,6 +129,9 @@ public class Transport {
     public Transport(Transport origin, Transport destination) {
         this.origin = origin.origin;
         this.destination = destination.destination;
+        this.originEndpoint = origin.originEndpoint == null ? origin : origin.originEndpoint;
+        this.destinationEndpoint = destination.destinationEndpoint == null
+                ? destination : destination.destinationEndpoint;
 
         for (int i = 0; i < skillLevels.length; i++) {
             this.skillLevels[i] = Math.max(
@@ -170,6 +176,14 @@ public class Transport {
         //END microbot variables
     }
 
+    Transport getOriginEndpoint() {
+        return originEndpoint == null ? this : originEndpoint;
+    }
+
+    Transport getDestinationEndpoint() {
+        return destinationEndpoint == null ? this : destinationEndpoint;
+    }
+
     /**
      * Base Transport constructor
      */
@@ -199,6 +213,12 @@ public class Transport {
         this(null, destination, displayInfo, transportType, isMember, 1);
         this.maxWildernessLevel = maxWildernessLevel;
         this.itemIdRequirements = itemIdRequirements != null ? new HashSet<>(itemIdRequirements) : new HashSet<>();
+    }
+
+    public Transport(WorldPoint destination, String displayInfo, TransportType transportType, boolean isMember,
+                     int maxWildernessLevel, Set<Set<Integer>> itemIdRequirements, boolean consumable) {
+        this(destination, displayInfo, transportType, isMember, maxWildernessLevel, itemIdRequirements);
+        this.isConsumable = consumable;
     }
 
     /**
@@ -604,7 +624,8 @@ public class Transport {
         addTransports(transports, "teleportation_levers.tsv", TransportType.TELEPORTATION_LEVER);
         addTransports(transports, "teleportation_portals.tsv", TransportType.TELEPORTATION_PORTAL);
         addTransports(transports, "teleportation_spells.tsv", TransportType.TELEPORTATION_SPELL);
-        addTransports(transports, "wilderness_obelisks.tsv", TransportType.WILDERNESS_OBELISK);
+        // Random obelisks do not encode a selectable destination contract.
+        // Keep the resource as audit evidence, but do not publish fabricated directed edges.
         addTransports(transports, "magic_carpets.tsv", TransportType.MAGIC_CARPET);
         addTransports(transports, "hot_air_balloons.tsv", TransportType.HOT_AIR_BALLOON, 7);
         addTransports(transports, "magic_mushtrees.tsv", TransportType.MAGIC_MUSHTREE, 5);
@@ -641,6 +662,7 @@ public class Transport {
                 ", itemIdRequirements=" + itemIdRequirements +
                 ", type=" + type +
                 ", duration=" + duration +
+                ", routeTicks=" + TransportCostModel.travelTicks(this) +
                 ", displayInfo='" + displayInfo + '\'' +
                 ", isConsumable=" + isConsumable +
                 ", maxWildernessLevel=" + maxWildernessLevel +

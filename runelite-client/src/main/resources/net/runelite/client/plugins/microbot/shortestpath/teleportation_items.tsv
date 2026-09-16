@@ -1,7 +1,7 @@
 # Destination	Skills	Item IDs	Quests	Varbits	Varplayers	isMembers	Consumable	Wilderness level	Duration	Display info
-# Ardougne Cloaks (2-4's farm teleport is limited to 3,5, or infinite times - can this be validated?)										
+# Ardougne Farm is limited on cloaks 2/3; only unlimited cloak 4 variants are routable.
 2606 3221 0		13121;13122;13123;13124;20760				Y	F	19	4	Ardougne cloak: Monastery
-2664 3374 0		13122;13123;13124;20760				Y	T	19	4	Ardougne cloak: Farm
+2664 3374 0		13124;20760				Y	F	19	4	Ardougne cloak: Farm
 # Karamja Gloves (Gem Mine underground)
 2840 9387 0		11140;13103				Y	F	19	4	Karamja gloves: Gem Mine
 # Karamja Gloves (Duradel underground)
@@ -219,8 +219,8 @@
 2604 3401 0		9798;9799				Y	F	19	4	Fishing cape: Fishing Guild
 2504 3484 0		9798;9799				Y	F	19	4	Fishing cape: Otto's Grotto
 1248 3725 0		9810;9811				Y	F	19	4	Farming cape: Teleport
-2556 2917 0		9948;9949				Y	F	19	4	Hunter cape: Feldip Hills
-3144 3772 0		9948;9949				Y	F	19	4	Hunter cape: Black chinchompa
+2556 2917 0		9948;9949		4819<5		Y	F	19	4	Hunter cape: Feldip Hills
+3144 3772 0		9948;9949		4819<5		Y	F	19	4	Hunter cape: Black chinchompa
 2865 3546 0		9750;9751				Y	F	19	4	Strength cape: Warriors' Guild
 # Max capes										
 # The Max cape's home teleports, determined by varbit 2187										
@@ -241,20 +241,19 @@
 3239 6077 0		13280;13342		2187=7		Y	F	19	4	Max cape: Home
 # 8 - Hosidius										
 1740 3517 0		13280;13342		2187=8		Y	F	19	4	Max cape: Home
-2952 3224 0		13280;13342				Y	F	19	4	Max cape: Rimmington
-2892 3465 0		13280;13342				Y	F	19	4	Max cape: Taverley
-3339 3001 0		13280;13342				Y	F	19	4	Max cape: Pollnivneach
-1743 3517 0		13280;13342				Y	F	19	4	Max cape: Hosidius
-2669 3629 0		13280;13342				Y	F	19	4	Max cape: Rellekka
-2756 3176 0		13280;13342				Y	F	19	4	Max cape: Brimhaven
-2545 3097 0		13280;13342				Y	F	19	4	Max cape: Yanille
-3239 6077 0		13280;13342				Y	F	19	4	Max cape: Prifddinas
-2865 3546 0		13280;13342				Y	F	19	4	Max cape: Warriors' Guild
-2604 3401 0		13280;13342				Y	F	19	4	Max cape: Fishing Guild
+2952 3224 0		13280				Y	F	19	4	Max cape: Rimmington
+2892 3465 0		13280				Y	F	19	4	Max cape: Taverley
+3339 3001 0		13280				Y	F	19	4	Max cape: Pollnivneach
+1743 3517 0		13280				Y	F	19	4	Max cape: Hosidius
+2669 3629 0		13280				Y	F	19	4	Max cape: Rellekka
+2756 3176 0		13280				Y	F	19	4	Max cape: Brimhaven
+2545 3097 0		13280				Y	F	19	4	Max cape: Yanille
+3239 6077 0		13280				Y	F	19	4	Max cape: Prifddinas
+2865 3546 0		13280				Y	F	19	4	Max cape: Warriors' Guild
+2604 3401 0		13280				Y	F	19	4	Max cape: Fishing Guild
 2931 3286 0		13280;13342				Y	F	19	4	Max cape: Crafting Guild
-2556 2917 0		13280;13342				Y	F	19	4	Max cape: Feldip Hills
-3144 3772 0		13280;13342				Y	F	19	4	Max cape: Black chinchompa
-3144 3772 0		13280;13342				Y	F	19	4	Max cape: Black chinchompa
+2556 2917 0		13280;13342		4819<5		Y	F	19	4	Max cape: Feldip Hills
+3144 3772 0		13280;13342		4819<5		Y	F	19	4	Max cape: Black chinchompa
 # Quest point cape (instead of using the item name we use the action teleport, we use the itemids to verifiy the item)										
 2728 3347 0		9813;13068				Y	F	19	4	Quest point cape: Teleport
 2689 3547 0		13221;13222				Y	F	19	4	Music cape: Teleport
@@ -279,8 +278,8 @@
 3096 3227 0		13069;19476				Y	F	19	4	Achievement diary cape: Twiggy O'Korn
 										
 # Quest Items										
-# Ectophial - includes the empty version										
-3659 3523 0		4251;4252				Y	F	19	4	Ectophial
+# Ectophial - only the full vial can teleport; the empty vial must be refilled first.
+3659 3523 0		4251				Y	F	19	4	Ectophial
 2330 3171 0		6099;6100;6101;6102;13102				Y	T	19	4	Teleport crystal: Lletya
 3264 6066 0		6099;6100;6101;6102;13102	Song of the Elves			Y	T	19	4	Teleport crystal: Prifddinas
 2330 3171 0		23946				Y	F	19	4	Eternal teleport crystal: Lletya
@@ -310,20 +309,20 @@
 1680 3746 0		25818	The Ascent of Arceuus	7857=1;6035>1		Y	T	19	4	Book of the dead: A Dark Disposition
 3649 3230 0		22400				Y	F	19	4	Drakan's medallion: Ver Sinhaza
 3592 3337 0		22400	Sins of the Father			Y	F	19	4	Drakan's medallion: Darkmeyer
-# todo: this only works if you've used a Slepey tablet on the medallion										
-3808 9700 0		22400				Y	F	19	4	Drakan's medallion: Slepe
+# 12416 = slepe_teleport_unlocked (set by using a Slepey tablet on the medallion)
+3808 9700 0		22400		12416=1		Y	F	19	4	Drakan's medallion: Slepe
 #mythical cape (instead of using the item name we use the action teleport, we use the itemids to verifiy the item)										
-2457 2850 0		21913;22114;24855				Y	F	19	4	Mythical cape: Teleport
+2457 2850 0		22114;24855				Y	F	19	4	Mythical cape: Teleport
 # Stony Basalt - 4493 is DIARY_FREMENNIK_HARD										
-2845 3694 0		22601				Y	T	19	4	Stony basalt: Troll Stronghold
-2837 3695 0	73 Agility	22601		4493=1		Y	T	19	4	Stony basalt: Troll Stronghold
-2846 3938 0		22599				Y	T	19	4	Icy basalt: Weiss
+2845 3694 0		22601	Making Friends with My Arm			Y	T	19	4	Stony basalt: Troll Stronghold
+2837 3695 0	73 Agility	22601	Making Friends with My Arm	4493=1		Y	T	19	4	Stony basalt: Troll Stronghold
+2846 3938 0		22599	Making Friends with My Arm			Y	T	19	4	Icy basalt: Weiss
 										
 # Other										
-1934 4428 0		26948				Y	T	19	4	Pharaoh's sceptre: Jalsavrah
-3341 2827 0		26948				Y	T	19	4	Pharaoh's sceptre: Jaleustrophos
-3232 2897 0		26948				Y	T	19	4	Pharaoh's sceptre: Jaldraocht
-3313 2718 0		26948				Y	T	19	4	Pharaoh's sceptre: Jaltevas
+1934 4428 0		26948;26950				Y	T	19	4	Pharaoh's sceptre: Jalsavrah
+3341 2827 0		26948;26950				Y	T	19	4	Pharaoh's sceptre: Jaleustrophos
+3232 2897 0		26948;26950				Y	T	19	4	Pharaoh's sceptre: Jaldraocht
+3313 2718 0		26948;26950		13839=1		Y	T	19	4	Pharaoh's sceptre: Jaltevas
 3081 3421 0		9013;21276					T	19	4	Skull sceptre
 1579 3530 0		13393				Y	T	19	4	Xeric's talisman: Xeric's Lookout
 1752 3566 0		13393				Y	T	19	4	Xeric's talisman: Xeric's Glade
@@ -331,7 +330,7 @@
 1644 3673 0		13393				Y	T	19	4	Xeric's talisman: Xeric's Heart
 # Requires the use of an ancient tablet to activate										
 # 1254 3560 0		13393				Y	T	19	4	Xeric's talisman: Xeric's Honour
-3200 3355 0		13660					T	19	4	Chronicle: Teleport
+3200 3355 0		13660					T	0	4	Chronicle: Teleport
 3615 9461 0		26914				Y	F	19	4	Amulet of the eye: Teleport
 2981 3276 0		26818				Y	T	19	4	Ring of the elements: Air Altar
 3170 3155 0		26818				Y	T	19	4	Ring of the elements: Water Altar
@@ -352,30 +351,30 @@
 1364 3275 0		29893		16757=1		Y	T	19	4	Pendant of ates: Nemus Retreat
 										
 #Quetzal Whistle — one row per map destination; quest Children of the Sun (item unlock). Varbit columns match quetzals.tsv for locked map pins.
-1389 2901 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Aldarin
-1697 3140 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Civitas illa Fortis
-1585 3053 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Hunter Guild
-1510 3221 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Quetzacalli Gorge
-1548 2995 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Sunset Coast
-1437 3171 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: The Teomat
-1779 3111 0		29271;29273;29275	Children of the Sun	9958=1		Y	T	19	4	Quetzal whistle: Fortis Colosseum
-1700 3037 0		29271;29273;29275	Children of the Sun	9957=1		Y	T	19	4	Quetzal whistle: Outer Fortis
-1670 2933 0		29271;29273;29275	Children of the Sun	9956=1		Y	T	19	4	Quetzal whistle: Colossal Wyrm Remains
-1446 3108 0		29271;29273;29275	Children of the Sun	9955=1		Y	T	19	4	Quetzal whistle: Cam Torum Entrance
-1613 3300 0		29271;29273;29275	Children of the Sun	11379=1		Y	T	19	4	Quetzal whistle: Salvager Overlook
-1226 3091 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Tal Teklan
-1344 3022 0		29271;29273;29275	Children of the Sun	17757=1		Y	T	19	4	Quetzal whistle: Kastori
-1411 3361 0		29271;29273;29275	Children of the Sun			Y	T	19	4	Quetzal whistle: Auburnvale
+1389 2901 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Aldarin
+1697 3140 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Civitas illa Fortis
+1585 3053 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Hunter Guild
+1510 3221 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Quetzacalli Gorge
+1548 2995 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Sunset Coast
+1437 3171 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: The Teomat
+1779 3111 0		29271;29273;29275	Children of the Sun	9958=1;19681=0		Y	T	19	4	Quetzal whistle: Fortis Colosseum
+1700 3037 0		29271;29273;29275	Children of the Sun	9957=1;19681=0		Y	T	19	4	Quetzal whistle: Outer Fortis
+1670 2933 0		29271;29273;29275	Children of the Sun	9956=1;19681=0		Y	T	19	4	Quetzal whistle: Colossal Wyrm Remains
+1446 3108 0		29271;29273;29275	Children of the Sun	9955=1;19681=0		Y	T	19	4	Quetzal whistle: Cam Torum Entrance
+1613 3300 0		29271;29273;29275	Children of the Sun	11379=1;19681=0		Y	T	19	4	Quetzal whistle: Salvager Overlook
+1226 3091 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Tal Teklan
+1344 3022 0		29271;29273;29275	Children of the Sun	17757=1;19681=0		Y	T	19	4	Quetzal whistle: Kastori
+1411 3361 0		29271;29273;29275	Children of the Sun	19681=0		Y	T	19	4	Quetzal whistle: Auburnvale
 #Giantsoul Amulet										
 3174 9898 0		30638				Y	T	19	4	Giantsoul Amulet: Bryophyta
 6208 6336 0		30638				Y	T	19	4	Giantsoul Amulet: Obor
 2952 9574 0		30638				Y	T	19	4	Giantsoul Amulet: Branda and Eldric
 
 #Ruins of Mokhaiotl
-1311 9497 0		31099;31101;31102;31103;31104;31105	The Final Dawn			Y	T	29	4	Mokhaiotl waystone: Channel
+1311 9497 0		31099	The Final Dawn			Y	T	29	4	Mokhaiotl waystone: Channel
 
 #Varlemore Waystone
-1439 9564 0		29090;29092;29093;29094;29095;29096;29097	Perilous Moons			Y	Y	29	4	Calcified moth: Crush
+1439 9564 0		29090	Perilous Moons			Y	T	20	4	Calcified moth: Crush
 # Cowbell amulet (Varlamore) - backfilled 2026-07-20 from upstream Skretzo/shortest-path
 3259 3277 0		33104				Y	T	20	4	Cowbell amulet
 # Sailors amulet (charged, Varlamore) - backfilled 2026-07-20 from upstream

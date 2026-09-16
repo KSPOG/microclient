@@ -1,0 +1,607 @@
+package net.runelite.client.plugins.microbot.util.walker.navigation;
+
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.client.plugins.microbot.util.walker.transport.NpcDialogueTransportPolicy;
+import org.junit.Test;
+
+import java.util.Arrays;
+import java.util.Collections;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+public class NavigationEngineTest
+{
+	private static final WorldPoint START = new WorldPoint(3200, 3200, 0);
+	private static final WorldPoint MID = new WorldPoint(3201, 3200, 0);
+	private static final WorldPoint LATE = new WorldPoint(3202, 3200, 0);
+	private static final WorldPoint TARGET = new WorldPoint(3203, 3200, 0);
+
+	@Test
+	public void phaseTransitionTableIsExplicit()
+	{
+		NavigationEngine engine = engine();
+
+		assertDecision(engine, observation(null, START, false, false, false),
+			NavigationDecision.Type.WAIT, NavigationPhase.CALCULATING);
+		assertDecision(engine, observation(plan(1), START, false, false, false),
+			NavigationDecision.Type.CLICK_TILE, NavigationPhase.FOLLOWING_ROUTE);
+		assertDecision(engine, observation(plan(1), MID, true, true, false),
+			NavigationDecision.Type.WAIT, NavigationPhase.APPROACHING_INTERACTION);
+		assertDecision(engine, observation(plan(1), MID, false, true, false),
+			NavigationDecision.Type.INTERACT, NavigationPhase.PERFORMING_INTERACTION);
+
+		NavigationObservation verifying = NavigationObservation.route(4, MID, plan(1), false,
+			false, true, true, true, false, "interaction-wait");
+		assertDecision(engine, verifying, NavigationDecision.Type.WAIT,
+			NavigationPhase.VERIFYING_INTERACTION);
+
+		NavigationObservation replan = NavigationObservation.route(5, MID, plan(1), false,
+			false, false, false, false, true, "off-path");
+		assertDecision(engine, replan, NavigationDecision.Type.REQUEST_REPLAN,
+			NavigationPhase.REPLANNING);
+
+		assertDecision(engine, NavigationObservation.terminal(
+			NavigationObservation.TerminalSignal.ARRIVED, "legacy-arrived"),
+			NavigationDecision.Type.COMPLETE, NavigationPhase.ARRIVED);
+	}
+
+	@Test
+	public void onePassReturnsAtMostOneInputCommand()
+	{
+		NavigationEngine engine = engine();
+		NavigationDecision click = engine.observe(observation(plan(1), START, false, false, false));
+
+		assertTrue(click.issuesInput());
+		assertEquals(NavigationDecision.Type.CLICK_TILE, click.getType());
+		assertEquals(TARGET, click.getTarget());
+		assertEquals(3, click.getTargetRawIndex());
+		assertEquals(3, click.getTargetSmoothedIndex());
+		assertEquals("raw-route-lookahead", click.getTargetSelection());
+
+		NavigationDecision interaction = engine.observe(
+			observation(plan(1), MID, false, true, false));
+		assertTrue(interaction.issuesInput());
+		assertEquals(NavigationDecision.Type.INTERACT, interaction.getType());
+		assertEquals(null, interaction.getTarget());
+	}
+
+	@Test
+	public void cancellationIsTerminal()
+	{
+		NavigationEngine engine = engine();
+		engine.observe(observation(plan(1), START, false, false, false));
+		NavigationSnapshot cancelled = engine.cancel("test-cancel");
+
+		assertEquals(NavigationPhase.CANCELLED, cancelled.getPhase());
+		assertTrue(cancelled.isTerminal());
+		assertTrue(cancelled.getRequest().getCancellationToken().isCancelled());
+
+		NavigationDecision afterCancel = engine.observe(observation(plan(2), MID, false, false, true));
+		assertEquals(NavigationDecision.Type.NO_ACTION, afterCancel.getType());
+		assertEquals(NavigationPhase.CANCELLED, engine.snapshot().getPhase());
+	}
+
+	@Test
+	public void progressOnlyMovesBackwardForANewGeneration()
+	{
+		NavigationEngine engine = engine();
+		engine.observe(observation(plan(1), LATE, true, false, false));
+		assertEquals(2, engine.snapshot().getSmoothedProgressIndex());
+
+		engine.observe(observation(plan(1), MID, true, false, false));
+		assertEquals(2, engine.snapshot().getSmoothedProgressIndex());
+
+		engine.observe(observation(plan(2), START, true, false, false));
+		assertEquals(0, engine.snapshot().getSmoothedProgressIndex());
+		assertEquals(2, engine.snapshot().getGeneration());
+	}
+
+	@Test
+	public void unownedMovementDoesNotDeferExternalReplan()
+	{
+		NavigationEngine engine = engine();
+		NavigationObservation movingReplan = NavigationObservation.route(1, START, plan(1), true,
+			false, false, false, false, true, "moving");
+
+		NavigationDecision decision = engine.observe(movingReplan);
+
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, decision.getType());
+		assertEquals(1, engine.snapshot().getRecoveryAttempts());
+		assertEquals(NavigationPhase.REPLANNING, engine.snapshot().getPhase());
+	}
+
+	@Test
+	public void mineableInteractionIsVerifiedBeforeCrossingContinues()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+		NavigationObservation ready = observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(available);
+
+		NavigationDecision interact = engine.observe(ready);
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getType());
+		assertEquals(available, interact.getInteraction());
+		engine.recordCommandResult(interact, true, 1L);
+
+		NavigationDecision verify = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(interaction(RouteInteraction.Status.CLEARED, true)));
+		assertEquals(NavigationDecision.Type.WAIT, verify.getType());
+		assertEquals(NavigationPhase.VERIFYING_INTERACTION, engine.snapshot().getPhase());
+		assertEquals(available.getRawEdgeIndex(),
+			engine.snapshot().getPendingInteraction().getRawEdgeIndex());
+
+		NavigationDecision cross = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(interaction(RouteInteraction.Status.CLEARED, true)));
+		assertEquals(NavigationDecision.Type.CLICK_TILE, cross.getType());
+		assertEquals(TARGET, cross.getTarget());
+		assertEquals("raw-route-lookahead", cross.getTargetSelection());
+		assertEquals("cross-cleared-interaction-edge", cross.getReason());
+
+		NavigationDecision crossed = engine.observe(observation(plan(1), LATE, true, false, false)
+			.withRouteInteraction(interaction(RouteInteraction.Status.CLEARED, true)));
+		assertEquals(NavigationDecision.Type.WAIT, crossed.getType());
+		assertEquals("interaction-edge-crossed", crossed.getReason());
+		assertEquals(null, engine.snapshot().getPendingInteraction());
+	}
+
+	@Test
+	public void unavailableMineableReportsRecoveryToEngine()
+	{
+		NavigationEngine engine = engine();
+		NavigationDecision decision = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(interaction(RouteInteraction.Status.UNAVAILABLE, true)));
+
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, decision.getType());
+		assertEquals(RecoveryCause.INTERACTION_UNAVAILABLE, decision.getRecoveryCause());
+		assertEquals(1, decision.getRecoveryAttempt());
+	}
+
+	@Test
+	public void unavailableObservationDefersToInFlightInteractionCommand()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+		NavigationDecision interact = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(available));
+		assertEquals(NavigationDecision.Type.INTERACT, interact.getType());
+		engine.recordCommandResult(interact, true, 1L);
+
+		// Mid-crossing the scene can transiently fail to re-resolve the object; the issued
+		// command owns the interaction until its acknowledgement deadline.
+		NavigationDecision waiting = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(interaction(RouteInteraction.Status.UNAVAILABLE, false)));
+		assertEquals(NavigationDecision.Type.WAIT, waiting.getType());
+		assertEquals("interaction-unavailable-command-in-flight", waiting.getReason());
+		assertEquals(0, engine.snapshot().getRecoveryAttempts());
+
+		NavigationDecision afterDeadline = engine.observe(
+			NavigationObservation.route(60_000L, MID, plan(1), false, false, false, false,
+				false, false, "deadline-passed")
+				.withRouteInteraction(interaction(RouteInteraction.Status.UNAVAILABLE, false)));
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, afterDeadline.getType());
+		assertEquals(RecoveryCause.INTERACTION_UNAVAILABLE, afterDeadline.getRecoveryCause());
+	}
+
+	@Test
+	public void successfulPreparationThatDidNotIssueCrossingRetriesImmediately()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+		NavigationObservation ready = observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(available);
+
+		NavigationDecision preparation = engine.observe(ready);
+		assertEquals(NavigationDecision.Type.INTERACT, preparation.getType());
+		engine.recordInteractionPreparation(preparation, 1L);
+
+		NavigationDecision crossing = engine.observe(ready);
+		assertEquals(NavigationDecision.Type.INTERACT, crossing.getType());
+		assertEquals("interaction-frontier-ready", crossing.getReason());
+	}
+
+	@Test
+	public void definitiveDialogueRejectionCancelsThenReplansWithoutVoyageDeadline()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction travel = interaction(RouteInteraction.Status.AVAILABLE, true, "Travel");
+		NavigationDecision interact = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(travel));
+		engine.recordCommandResult(interact, true, 1L);
+		RouteInteraction cancel = interaction(RouteInteraction.Status.AVAILABLE, true,
+			"dialogue-cancel-unavailable");
+		NavigationDecision cancelDecision = engine.observe(
+			NavigationObservation.route(2L, MID, plan(1), false, false, false, false,
+				false, false, "locked-menu").withRouteInteraction(cancel));
+		assertEquals(NavigationDecision.Type.INTERACT, cancelDecision.getType());
+		assertEquals("dialogue-cancel-unavailable", cancelDecision.getInteraction().getAction());
+		engine.recordCommandResult(cancelDecision, true, 2L);
+		RouteInteraction unavailable = interaction(RouteInteraction.Status.UNAVAILABLE, false,
+			"dialogue-destination-unavailable");
+		NavigationDecision replan = engine.observe(
+			NavigationObservation.route(3L, MID, plan(1), false, false, false, false,
+				false, false, "menu-closed").withRouteInteraction(unavailable));
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, replan.getType());
+		assertEquals(RecoveryCause.INTERACTION_UNAVAILABLE, replan.getRecoveryCause());
+	}
+
+	@Test
+	public void readyMineableSupersedesGroundMovement()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+
+		NavigationDecision decision = engine.observe(observation(plan(1), MID, true, false, false)
+			.withRouteInteraction(available));
+
+		assertEquals(NavigationDecision.Type.INTERACT, decision.getType());
+		assertEquals(available, decision.getInteraction());
+		assertEquals(NavigationPhase.PERFORMING_INTERACTION, engine.snapshot().getPhase());
+	}
+
+	@Test
+	public void rangedInteractionDoesNotRepeatWhileServerApproachIsMoving()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+		NavigationDecision interact = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(available));
+		engine.recordCommandResult(interact, true, 1L);
+
+		NavigationObservation movingAfterTimeout = NavigationObservation.route(10_000L, MID,
+			plan(1), true, false, false, false, false, false, "server-approach")
+			.withRouteInteraction(available);
+		NavigationDecision wait = engine.observe(movingAfterTimeout);
+
+		assertEquals(NavigationDecision.Type.WAIT, wait.getType());
+		assertEquals("interaction-command-in-flight", wait.getReason());
+	}
+
+	@Test
+	public void rangedInteractionUsesDistanceAwareAcknowledgementWindow()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction ranged = new RouteInteraction(1, 1, MID, LATE, TARGET,
+			RouteInteraction.Kind.MINEABLE, RouteInteraction.Status.AVAILABLE, "mine", true);
+		NavigationDecision interact = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(ranged));
+		engine.recordCommandResult(interact, true, 1L);
+
+		NavigationObservation settledAfterBaseTimeout = NavigationObservation.route(6_000L, MID,
+			plan(1), false, false, false, false, false, false, "server-approach")
+			.withRouteInteraction(ranged);
+		NavigationDecision wait = engine.observe(settledAfterBaseTimeout);
+
+		assertEquals(NavigationDecision.Type.WAIT, wait.getType());
+		assertEquals("interaction-command-in-flight", wait.getReason());
+	}
+
+	@Test
+	public void transformedTrapdoorStageCanDispatchWithoutWaitingForOldDeadline()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction open = new RouteInteraction(1, 1, MID, LATE, LATE,
+			RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+			"Open", true, 123, MID, TARGET);
+		NavigationDecision first = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(open));
+		engine.recordCommandResult(first, true, 1L);
+
+		RouteInteraction climb = new RouteInteraction(1, 1, MID, LATE, LATE,
+			RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+			"Climb-down", true, 123, MID, TARGET);
+		NavigationDecision second = engine.observe(
+			observation(plan(1), MID, false, false, false).withRouteInteraction(climb));
+
+		assertEquals(NavigationDecision.Type.INTERACT, second.getType());
+		assertEquals("Climb-down", second.getInteraction().getAction());
+	}
+
+	@Test
+	public void zanarisEquipmentAndMenuStagesRetainOneOwnerThroughLanding()
+	{
+		NavigationEngine engine = engine();
+		RoutePlan plan = new RoutePlan(1, 1, START, Collections.singleton(TARGET),
+			Arrays.asList(START, TARGET), Arrays.asList(START, TARGET), true,
+			Collections.singletonList(new RouteEdge(0, START, TARGET, RouteEdge.Kind.CATALOG_TRANSITION)));
+		RouteInteraction pending = null;
+		for (String action : Arrays.asList("zanaris-open-inventory", "zanaris-wield-staff",
+			"Open", "zanaris-select-destination"))
+		{
+			pending = new RouteInteraction(1, 0, START, TARGET, START,
+				RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+				action, true, 2406, START, TARGET);
+			NavigationDecision command = engine.observe(observation(plan, START, false, false, false)
+				.withRouteInteraction(pending));
+			assertEquals(NavigationDecision.Type.INTERACT, command.getType());
+			assertEquals(action, command.getInteraction().getAction());
+			engine.recordCommandResult(command, true, 1L);
+			assertEquals(NavigationDecision.Type.WAIT, engine.observe(
+				observation(plan, START, false, false, false).withRouteInteraction(pending)).getType());
+		}
+		assertEquals(NavigationDecision.Type.WAIT, engine.observe(
+			observation(plan, START, false, false, false).withRouteInteraction(
+				pending.withStatus(RouteInteraction.Status.UNAVAILABLE, false))).getType());
+		assertEquals("interaction-edge-crossed", engine.observe(
+			observation(plan, TARGET, false, false, false).withRouteInteraction(
+				pending.withStatus(RouteInteraction.Status.CLEARED, false))).getReason());
+		assertEquals(NavigationDecision.Type.COMPLETE,
+			engine.observe(observation(plan, TARGET, false, false, false)).getType());
+	}
+
+	@Test
+	public void catalogLandingCannotBeRetiredByNearbyRawProgress()
+	{
+		for (RouteInteraction.Status status : Arrays.asList(RouteInteraction.Status.AVAILABLE,
+			RouteInteraction.Status.UNAVAILABLE))
+		{
+			NavigationEngine engine = engine();
+			RoutePlan plan = new RoutePlan(1, 1, START, Collections.singleton(TARGET),
+				Arrays.asList(START, TARGET), Arrays.asList(START, TARGET), true,
+				Collections.singletonList(new RouteEdge(0, START, TARGET, RouteEdge.Kind.CATALOG_TRANSITION)));
+			RouteInteraction pending = new RouteInteraction(1, 0, START, TARGET, START,
+				RouteInteraction.Kind.CATALOG_TRANSITION, RouteInteraction.Status.AVAILABLE,
+				"Climb", true, 123, START, TARGET);
+			NavigationDecision first = engine.observe(observation(plan, START, false, false, false)
+				.withRouteInteraction(pending));
+			assertEquals(NavigationDecision.Type.INTERACT, first.getType());
+			engine.recordCommandResult(first, true, 1);
+			NavigationDecision approach = engine.observe(observation(plan, LATE, false, false, false)
+				.withRouteInteraction(pending.withStatus(status, status == RouteInteraction.Status.AVAILABLE)));
+			assertEquals(1, engine.snapshot().getRawProgressIndex());
+			assertEquals(NavigationDecision.Type.WAIT, approach.getType());
+			assertEquals(status == RouteInteraction.Status.AVAILABLE ? "interaction-command-in-flight"
+				: "interaction-unavailable-command-in-flight", approach.getReason());
+			NavigationDecision landed = engine.observe(observation(plan, TARGET, false, false, false)
+				.withRouteInteraction(pending.withStatus(RouteInteraction.Status.CLEARED, false)));
+			assertEquals("interaction-edge-crossed", landed.getReason());
+			assertEquals(NavigationDecision.Type.COMPLETE,
+				engine.observe(observation(plan, TARGET, false, false, false)).getType());
+		}
+	}
+
+	@Test
+	public void wideGateCannotRetireFromNearSideRouteProgress()
+	{
+		NavigationEngine engine = engine();
+		WorldPoint from = new WorldPoint(3202, 3197, 0);
+		WorldPoint nearSide = new WorldPoint(3203, 3199, 0);
+		RoutePlan plan = new RoutePlan(1, 1, from, Collections.singleton(TARGET),
+			Arrays.asList(from, TARGET), Arrays.asList(from, TARGET), true,
+			Collections.singletonList(new RouteEdge(0, from, TARGET, RouteEdge.Kind.ADJACENT_TRANSPORT)));
+		RouteInteraction pending = new RouteInteraction(1, 0, from, TARGET, from,
+			RouteInteraction.Kind.ADJACENT_TRANSPORT, RouteInteraction.Status.AVAILABLE,
+			"Open", true, 190, from, TARGET);
+		NavigationDecision first = engine.observe(observation(plan, from, false, false, false)
+			.withRouteInteraction(pending));
+		assertEquals(NavigationDecision.Type.INTERACT, first.getType());
+		engine.recordCommandResult(first, true, 1);
+		NavigationDecision approach = engine.observe(observation(plan, nearSide, false, false, false)
+			.withRouteInteraction(pending));
+		assertEquals(1, engine.snapshot().getRawProgressIndex());
+		assertEquals("interaction-command-in-flight", approach.getReason());
+		assertTrue(engine.snapshot().getPendingInteraction() != null);
+		NavigationDecision landed = engine.observe(observation(plan, TARGET, false, false, false)
+			.withRouteInteraction(pending.withStatus(RouteInteraction.Status.CLEARED, false)));
+		assertEquals("interaction-edge-crossed", landed.getReason());
+	}
+
+	@Test
+	public void consecutiveDialogueContinueFramesRetryWithoutVoyageTimeout()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction continueFrame = interaction(RouteInteraction.Status.AVAILABLE, true,
+			NpcDialogueTransportPolicy.CONTINUE_ACTION);
+		NavigationDecision first = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(continueFrame));
+		engine.recordCommandResult(first, true, 1L);
+
+		NavigationDecision inFlight = engine.observe(NavigationObservation.route(2_000L, MID,
+			plan(1), false, false, false, false, false, false, "same-continue")
+			.withRouteInteraction(continueFrame));
+		NavigationDecision retry = engine.observe(NavigationObservation.route(2_002L, MID,
+			plan(1), false, false, false, false, false, false, "next-continue")
+			.withRouteInteraction(continueFrame));
+
+		assertEquals(NavigationDecision.Type.WAIT, inFlight.getType());
+		assertEquals("interaction-command-in-flight", inFlight.getReason());
+		assertEquals(NavigationDecision.Type.INTERACT, retry.getType());
+		assertEquals(NpcDialogueTransportPolicy.CONTINUE_ACTION,
+			retry.getInteraction().getAction());
+	}
+
+	@Test
+	public void disappearingDialogueContinuePromotesToVoyageTimeout()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction continueFrame = interaction(RouteInteraction.Status.AVAILABLE, true,
+			NpcDialogueTransportPolicy.CONTINUE_ACTION);
+		NavigationDecision first = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(continueFrame));
+		engine.recordCommandResult(first, true, 1L);
+
+		RouteInteraction voyage = continueFrame.withStatus(RouteInteraction.Status.AVAILABLE, false);
+		NavigationDecision started = engine.observe(NavigationObservation.route(1_000L, MID,
+			plan(1), false, false, false, false, false, false, "voyage-started")
+			.withRouteInteraction(voyage));
+		NavigationDecision inTransit = engine.observe(NavigationObservation.route(20_000L, MID,
+			plan(1), false, false, false, false, false, false, "in-transit")
+			.withRouteInteraction(voyage));
+		NavigationDecision landed = engine.observe(NavigationObservation.route(21_000L, TARGET,
+			plan(1), false, false, false, false, false, false, "landed")
+			.withRouteInteraction(voyage.withStatus(RouteInteraction.Status.CLEARED, false)));
+
+		assertEquals("interaction-command-in-flight", started.getReason());
+		assertEquals("interaction-command-in-flight", inTransit.getReason());
+		assertEquals("interaction-edge-crossed", landed.getReason());
+		assertEquals(NavigationDecision.Type.COMPLETE,
+			engine.observe(observation(plan(1), TARGET, false, false, false)).getType());
+	}
+
+	@Test
+	public void continueFrameReappearingAfterDialogueGapAdvancesImmediately()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction continueFrame = interaction(RouteInteraction.Status.AVAILABLE, true,
+			NpcDialogueTransportPolicy.CONTINUE_ACTION);
+		NavigationDecision first = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(continueFrame));
+		engine.recordCommandResult(first, true, 1L);
+
+		RouteInteraction gap = continueFrame.withStatus(RouteInteraction.Status.AVAILABLE, false);
+		engine.observe(NavigationObservation.route(1_000L, MID, plan(1), false, false,
+			false, false, false, false, "dialogue-gap").withRouteInteraction(gap));
+		NavigationDecision nextFrame = engine.observe(NavigationObservation.route(1_500L, MID,
+			plan(1), false, false, false, false, false, false, "next-frame")
+			.withRouteInteraction(continueFrame));
+
+		assertEquals(NavigationDecision.Type.INTERACT, nextFrame.getType());
+		assertEquals(NpcDialogueTransportPolicy.CONTINUE_ACTION,
+			nextFrame.getInteraction().getAction());
+	}
+
+	@Test
+	public void nearbyPartialEndpointStillRequestsAReplan()
+	{
+		NavigationEngine engine = new NavigationEngine();
+		WorldPoint requested = new WorldPoint(3210, 3200, 0);
+		engine.start(new NavigationRequest(1, Collections.singleton(requested), 0,
+			NavigationRouteOptions.defaults(), "partial-end-test"));
+		RoutePlan partial = new RoutePlan(1, 1, START, Collections.singleton(requested),
+			Arrays.asList(START, MID), Arrays.asList(START, MID), false);
+		NavigationDecision decision = engine.observe(NavigationObservation.route(1, LATE, partial,
+			false, false, false, false, false, false, "partial-end-test"));
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, decision.getType());
+		assertEquals("route-end-before-arrival", decision.getReason());
+	}
+
+	private static NavigationEngine engine()
+	{
+		NavigationEngine engine = new NavigationEngine();
+		engine.start(new NavigationRequest(1, Collections.singleton(TARGET), 0,
+			NavigationRouteOptions.defaults(), "test"));
+		return engine;
+	}
+
+	@Test
+	public void newPlanDoesNotWaitForUnownedMovementToFinish()
+	{
+		NavigationEngine engine = engine();
+		assertEquals(NavigationDecision.Type.CLICK_TILE, engine.observe(NavigationObservation.route(
+			1, START, plan(1), true, false, false, false, false, false, "misclick")
+			.withMovementDestination(new WorldPoint(3210, 3210, 0))).getType());
+	}
+
+	@Test
+	public void unrelatedActorInteractionDoesNotBlockRouteInteraction()
+	{
+		NavigationEngine engine = engine();
+		NavigationObservation combat = NavigationObservation.route(1, MID, plan(1), false,
+			true, true, false, false, false, "combat")
+			.withRouteInteraction(interaction(RouteInteraction.Status.AVAILABLE, true));
+		assertEquals(NavigationDecision.Type.INTERACT, engine.observe(combat).getType());
+	}
+
+	@Test
+	public void rejectedRejoinFallsBackToReplan()
+	{
+		NavigationEngine engine = engine();
+		NavigationObservation moving = NavigationObservation.route(1, START, plan(1), true,
+			false, false, false, false, false, "misclick")
+			.withMovementDestination(new WorldPoint(3210, 3210, 0));
+		NavigationDecision correction = engine.observe(moving);
+		assertEquals("route-rejoin", correction.getTargetSelection());
+		engine.recordCommandResult(correction, false, 1L);
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, engine.observe(moving).getType());
+	}
+
+	@Test
+	public void staleMisclickDestinationGetsAcknowledgementWindowThenReplan()
+	{
+		NavigationEngine engine = engine();
+		WorldPoint wrong = new WorldPoint(3210, 3210, 0);
+		NavigationDecision correction = engine.observe(NavigationObservation.route(1, START, plan(1), true,
+			false, false, false, false, false, "misclick").withMovementDestination(wrong));
+		engine.recordCommandResult(correction, true, 1L);
+		assertEquals(NavigationDecision.Type.WAIT, engine.observe(NavigationObservation.route(2, START,
+			plan(1), true, false, false, false, false, false, "stale-destination")
+			.withMovementDestination(wrong)).getType());
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, engine.observe(NavigationObservation.route(2_000,
+			START, plan(1), true, false, false, false, false, false, "no-ack")
+			.withMovementDestination(wrong)).getType());
+	}
+
+	@Test
+	public void misclickCorrectionCannotSkipObservedObstacle()
+	{
+		NavigationEngine engine = engine();
+		NavigationDecision first = engine.observe(observation(plan(1), START, false, false, false));
+		engine.recordCommandResult(first, true, 1L);
+		NavigationDecision correction = engine.observe(NavigationObservation.route(2, START, plan(1), true,
+			false, false, false, false, false, "misclick")
+			.withMovementDestination(new WorldPoint(3210, 3210, 0))
+			.withRouteInteraction(interaction(RouteInteraction.Status.AVAILABLE, false)));
+		assertEquals(NavigationDecision.Type.REQUEST_REPLAN, correction.getType());
+	}
+
+	@Test
+	public void combatDoesNotExtendOwnedInteractionDeadline()
+	{
+		NavigationEngine engine = engine();
+		RouteInteraction available = interaction(RouteInteraction.Status.AVAILABLE, true);
+		NavigationDecision command = engine.observe(observation(plan(1), MID, false, false, false)
+			.withRouteInteraction(available));
+		engine.recordCommandResult(command, true, 1L);
+		assertEquals(NavigationDecision.Type.WAIT, engine.observe(NavigationObservation.route(
+			2_000L, MID, plan(1), false, true, true, false, false, false, "combat")
+			.withRouteInteraction(available)).getType());
+		assertEquals(NavigationDecision.Type.INTERACT, engine.observe(NavigationObservation.route(
+			60_000L, MID, plan(1), false, true, true, false, false, false, "combat")
+			.withRouteInteraction(available)).getType());
+	}
+
+	@Test
+	public void compatibilityFrontierOnlyWaitsForOwnedCommand()
+	{
+		NavigationEngine engine = engine();
+		assertEquals(NavigationDecision.Type.INTERACT, engine.observe(NavigationObservation.route(
+			1, MID, plan(1), false, true, true, true, false, false, "combat")).getType());
+		assertEquals(NavigationDecision.Type.WAIT, engine.observe(NavigationObservation.route(
+			2, MID, plan(1), false, true, true, true, true, false, "owned-command")).getType());
+	}
+
+	private static NavigationObservation observation(RoutePlan plan, WorldPoint player,
+		boolean moving, boolean interactionFrontier, boolean replan)
+	{
+		return NavigationObservation.route(1, player, plan, moving, false, false,
+			interactionFrontier, false, replan, "test-observation");
+	}
+
+	private static RoutePlan plan(long generation)
+	{
+		return new RoutePlan(1, generation, START, Collections.singleton(TARGET),
+			Arrays.asList(START, MID, LATE, TARGET), Arrays.asList(START, MID, LATE, TARGET), true);
+	}
+
+	private static RouteInteraction interaction(RouteInteraction.Status status, boolean ready)
+	{
+		return new RouteInteraction(1, 1, MID, LATE, LATE,
+			RouteInteraction.Kind.MINEABLE, status, "mine", ready);
+	}
+
+	private static RouteInteraction interaction(RouteInteraction.Status status, boolean ready,
+		String action)
+	{
+		return new RouteInteraction(1, 1, MID, LATE, LATE,
+			RouteInteraction.Kind.NPC_DIALOGUE_TRANSPORT, status, action, ready,
+			30914, MID, LATE);
+	}
+
+	private static void assertDecision(NavigationEngine engine, NavigationObservation observation,
+		NavigationDecision.Type decision, NavigationPhase phase)
+	{
+		assertEquals(decision, engine.observe(observation).getType());
+		assertEquals(phase, engine.snapshot().getPhase());
+	}
+}

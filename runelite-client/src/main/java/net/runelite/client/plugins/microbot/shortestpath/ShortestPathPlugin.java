@@ -19,13 +19,11 @@
 
 package net.runelite.client.plugins.microbot.shortestpath;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.inject.Inject;
 import com.google.inject.Provides;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import lombok.Setter;
 import net.runelite.api.Point;
 import net.runelite.api.*;
 import net.runelite.api.coords.WorldPoint;
@@ -60,8 +58,16 @@ import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCol
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveRouteValidator;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.SplitFlagMap;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
+import net.runelite.client.plugins.microbot.util.walker.transport.Rs2NpcDialogueTransportScene;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
-import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationEngineRuntime;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationRequest;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationRouteOptions;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationSnapshot;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationWalkRuntime;
+import net.runelite.client.plugins.microbot.util.walker.navigation.RoutePlan;
+import net.runelite.client.plugins.microbot.util.walker.navigation.RoutePlannerRuntime;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.JagexColors;
 import net.runelite.client.ui.NavigationButton;
@@ -79,10 +85,6 @@ import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
 import java.util.List;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ThreadFactory;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -174,11 +176,6 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     private Point lastMenuOpenedPoint;
     private ShortestPathPanel panel;
     private PohPanel pohPanel;
-    @Getter
-    @Setter
-    public static WorldMapPoint marker;
-    @Setter
-    public static volatile WorldPoint lastLocation = new WorldPoint(0, 0, 0);
     private NavigationButton navButton, pohNavButton;
     private Shape minimapClipFixed;
     private Shape minimapClipResizeable;
@@ -186,28 +183,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     private BufferedImage minimapSpriteResizeable;
     private Rectangle minimapRectangle = new Rectangle();
 
-    @Getter
-    @Setter
-    public static volatile ExecutorService pathfindingExecutor = Executors.newSingleThreadExecutor();
-    @Getter
-    @Setter
-    public static volatile Future<?> pathfinderFuture;
-    @Getter
-    public static final Object pathfinderMutex = new Object();
 	private static final Map<String, Object> configOverride = new HashMap<>(50);
-    @Getter
-    @Setter
-    public static volatile Pathfinder pathfinder;
-    @Getter
-    public static PathfinderConfig pathfinderConfig;
-    @Getter
-    @Setter
-    public static boolean startPointSet = false;
-    @Setter
-    private static int reachedDistance;
-    @Getter(AccessLevel.PACKAGE)
-    private ShortestPathScript shortestPathScript;
-
     // Set by onGameStateChanged when the client transitions to LOGGED_IN. Consumed on the next
     // game tick so varbits, quest states, inventory, and bank containers are hydrated before
     // PathfinderConfig#refresh rebuilds the transport availability cache. Without this the
@@ -227,7 +203,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         Map<WorldPoint, Set<Transport>> transports = Transport.loadAllFromResources();
 
         List<Restriction> restrictions = Restriction.loadAllFromResources();
-        pathfinderConfig = new PathfinderConfig(map, transports, restrictions, client, config);
+        Rs2PathApi.setPathfinderConfig(new PathfinderConfig(map, transports, restrictions, client, config));
 
         panel = injector.getInstance(ShortestPathPanel.class);
         pohPanel = new PohPanel(config);
@@ -249,9 +225,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
                 .build();
         clientToolbar.addNavigation(pohNavButton);
 
-        Rs2Walker.setConfig(config);
-        shortestPathScript = new ShortestPathScript();
-        shortestPathScript.run(config);
+        Rs2PathApi.configureWalker(config);
 
         overlayManager.add(pathOverlay);
         overlayManager.add(pathMinimapOverlay);
@@ -279,8 +253,8 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     @Override
     protected void shutDown() {
-        // Unregister hotkey listeners first so any in-flight keystroke can't
-        // dereference panel/shortestPathScript after we null/tear them down.
+        // Unregister hotkey listeners first so an in-flight keystroke cannot
+        // publish a new request while the UI adapter is shutting down.
         keyManager.unregisterKeyListener(hunterHotkeyListener);
         keyManager.unregisterKeyListener(farmingHotkeyListener);
         keyManager.unregisterKeyListener(clueHotkeyListener);
@@ -295,8 +269,9 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
         // Flush any live-collision the last capture learned and stop the I/O thread.
         if (liveCollisionPersistence != null) {
-            if (pathfinderConfig != null) {
-                liveCollisionPersistence.persist(pathfinderConfig.getLiveCollisionOverlay().drainDirty());
+            if (Rs2PathApi.getPathfinderConfig() != null) {
+                liveCollisionPersistence.persist(Rs2PathApi.getPathfinderConfig()
+                        .getLiveCollisionOverlay().drainDirty());
             }
             liveCollisionPersistence.shutdown();
             liveCollisionPersistence = null;
@@ -318,50 +293,40 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         PohPanel.instance = null;
         pohPanel = null;
 
-        shortestPathScript.shutdown();
-
-        exit();
-    }
-
-    //Method from microbot
-    public static void exit() {
-        if (pathfindingExecutor != null) {
-            Rs2Walker.clearWalkingRoute("shortest-path-plugin:exit");
-            pathfindingExecutor.shutdownNow();
-            pathfindingExecutor = null;
-        }
+        NavigationWalkRuntime.shutdown();
+        RoutePlannerRuntime.shutdown();
+        clearTargetMarker();
+        Rs2PathApi.setPathfinderConfig(null);
     }
 
     public void restartPathfinding(WorldPoint start, Set<WorldPoint> ends, boolean canReviveFiltered) {
-        ExecutorService executor;
-        synchronized (pathfinderMutex) {
-            if (pathfinder != null) {
-                pathfinder.cancel();
-                pathfinderFuture.cancel(true);
-            }
+        restartPathfinding(start, ends, canReviveFiltered, false);
+    }
 
-            if ((executor = pathfindingExecutor) == null) {
-                ThreadFactory shortestPathNaming = new ThreadFactoryBuilder().setNameFormat("shortest-path-%d").build();
-                executor = Executors.newSingleThreadExecutor(shortestPathNaming);
-                pathfindingExecutor = executor;
-            }
+    private void restartPathfinding(WorldPoint start, Set<WorldPoint> ends,
+                                    boolean canReviveFiltered, boolean newRequest) {
+        final RoutePlannerRuntime.Preparation preparation = newRequest
+                ? RoutePlannerRuntime.beginNewRequest()
+                : RoutePlannerRuntime.beginReplan();
+        if (ends != null && !ends.isEmpty()) {
+            NavigationRouteOptions routeOptions = new NavigationRouteOptions(true,
+                    config.useAgilityShortcuts(), config.walkWithBankedTransports(),
+                    config.recalculateDistance());
+            NavigationEngineRuntime.ensureRequest(new NavigationRequest(preparation.getRequestId(), ends,
+                    Math.max(0, Rs2PathApi.getReachedDistance()), routeOptions, "shortest-path-ui"));
         }
-
-        final ExecutorService finalExecutor = executor;
         final long scheduleTime = System.currentTimeMillis();
         getClientThread().invokeLater(() -> {
             long invokeLaterDelay = System.currentTimeMillis() - scheduleTime;
             long refreshStart = System.currentTimeMillis();
-            pathfinderConfig.refresh();
+            Rs2PathApi.getPathfinderConfig().refresh();
             long refreshTime = System.currentTimeMillis() - refreshStart;
-            pathfinderConfig.filterLocations(ends, canReviveFiltered);
-            synchronized (pathfinderMutex) {
-                if (ends.isEmpty()) {
-                    setTarget(null);
-                } else {
-                    pathfinder = new Pathfinder(pathfinderConfig, start, ends);
-                    pathfinderFuture = finalExecutor.submit(pathfinder);
-                }
+            Rs2PathApi.getPathfinderConfig().filterLocations(ends, canReviveFiltered);
+            if (ends.isEmpty()) {
+                setTarget(null);
+            } else {
+                RoutePlannerRuntime.submit(preparation,
+                        new Pathfinder(Rs2PathApi.getPathfinderConfig(), start, ends));
             }
             log.info("[ShortestPath] restartPathfinding: invokeLater delay={}ms, config.refresh={}ms",
                     invokeLaterDelay, refreshTime);
@@ -374,22 +339,6 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     public void restartPathfinding(WorldPoint start, WorldPoint end) {
         restartPathfinding(start, Set.of(end), true);
-    }
-
-    public boolean isNearPath(WorldPoint location) {
-        if (pathfinder == null || !pathfinder.isDone() || pathfinder.getPath() == null || pathfinder.getPath().isEmpty() ||
-                config.recalculateDistance() < 0 || lastLocation.equals(lastLocation = location)) {
-            return true;
-        }
-
-        var reachableTiles = Rs2Tile.getReachableTilesFromTile(location, config.recalculateDistance() - 1);
-        for (WorldPoint point : pathfinder.getPath()) {
-            if (reachableTiles.containsKey(point)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static final Set<String> PATH_REFRESH_CONFIG_KEYS = Set.of(
@@ -437,8 +386,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
         cacheConfigValues();
 
-		// Reset config in Rs2Walker when changed
-		Rs2Walker.setConfig(config);
+		Rs2PathApi.configureWalker(config);
 
         if ("verboseWalkerLogging".equals(event.getKey())) {
             applyVerboseWalkerLogging(config.verboseWalkerLogging());
@@ -466,8 +414,9 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         // One-shot developer action: wipe everything the live overlay has learned (memory + disk).
         if (RESET_LEARNED_COLLISION_KEY.equals(event.getKey()) && Boolean.parseBoolean(event.getNewValue())) {
             resetLearnedCollision();
-            if (pathfinder != null) {
-                restartPathfinding(pathfinder.getStart(), pathfinder.getTargets());
+            RoutePlan routePlan = getRoutePlan();
+            if (routePlan != null) {
+                restartPathfinding(routePlan.getStart(), routePlan.getTargets());
             }
             configManager.setConfiguration(CONFIG_GROUP, RESET_LEARNED_COLLISION_KEY, false);
             return;
@@ -475,8 +424,9 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
         boolean reloadRequested = RELOAD_TRANSPORT_DEFINITIONS_KEY.equals(event.getKey())
                 && Boolean.parseBoolean(event.getNewValue());
-        if (reloadRequested && pathfinderConfig != null) {
-            int reloadedOrigins = pathfinderConfig.reloadTransportDefinitionsFromResources();
+        if (reloadRequested && Rs2PathApi.getPathfinderConfig() != null) {
+            int reloadedOrigins = Rs2PathApi.getPathfinderConfig()
+                    .reloadTransportDefinitionsFromResources();
             log.info("[ShortestPath] Reloaded transport TSV definitions from resources (origins={})", reloadedOrigins);
         }
 
@@ -484,11 +434,12 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         if (reloadRequested
                 || TRANSPORT_OPTIONS_REGEX.matcher(event.getKey()).matches()
                 || PATH_REFRESH_CONFIG_KEYS.contains(event.getKey())) {
-            if (pathfinderConfig != null) {
-                pathfinderConfig.invalidateTransportRefreshCache();
+            if (Rs2PathApi.getPathfinderConfig() != null) {
+                Rs2PathApi.getPathfinderConfig().invalidateTransportRefreshCache();
             }
-            if (pathfinder != null) {
-                restartPathfinding(pathfinder.getStart(), pathfinder.getTargets());
+            RoutePlan routePlan = getRoutePlan();
+            if (routePlan != null) {
+                restartPathfinding(routePlan.getStart(), routePlan.getTargets());
             }
         }
 
@@ -565,8 +516,9 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 				}
 			}
 
-			boolean useOld = targets.isEmpty() && pathfinder != null;
-			restartPathfinding(start, useOld ? pathfinder.getTargets() : targets, useOld);
+			RoutePlan routePlan = getRoutePlan();
+			boolean useOld = targets.isEmpty() && routePlan != null;
+			restartPathfinding(start, useOld ? routePlan.getTargets() : targets, useOld);
 		} else if (PLUGIN_MESSAGE_CLEAR.equals(action)) {
 			ShortestPathPlugin.configOverride.clear();
 			cacheConfigValues();
@@ -601,15 +553,27 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     @Subscribe
     public void onGameStateChanged(GameStateChanged event) {
+        if (NavigationPresentation.invalidatesSession(event.getGameState())) {
+            pendingLoginRefresh = false;
+            if (NavigationWalkRuntime.getTarget() != null) {
+                NavigationWalkRuntime.cancel("shortest-path-ui:game-state-"
+                        + event.getGameState().name().toLowerCase(Locale.ROOT));
+            } else {
+                RoutePlannerRuntime.cancel();
+            }
+        }
+        if (event.getGameState() == GameState.LOGIN_SCREEN && Rs2PathApi.getPathfinderConfig() != null) {
+            Rs2PathApi.getPathfinderConfig().clearFossilRowboatMenu();
+        }
         if (event.getGameState() == GameState.LOGGED_IN) {
             pendingLoginRefresh = true;
         }
     }
 
     void handlePendingLoginRefresh() {
-        if (pendingLoginRefresh && pathfinderConfig != null) {
+        if (pendingLoginRefresh && Rs2PathApi.getPathfinderConfig() != null) {
             try {
-                pathfinderConfig.refresh();
+                Rs2PathApi.getPathfinderConfig().refresh();
                 pendingLoginRefresh = false;
             } catch (Exception e) {
                 log.warn("[ShortestPath] post-login refresh failed", e);
@@ -678,8 +642,8 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     }
 
     private void resetLearnedCollision() {
-        if (pathfinderConfig != null) {
-            pathfinderConfig.getLiveCollisionOverlay().clear();
+        if (Rs2PathApi.getPathfinderConfig() != null) {
+            Rs2PathApi.getPathfinderConfig().getLiveCollisionOverlay().clear();
         }
         if (liveCollisionPersistence != null) {
             liveCollisionPersistence.deleteAllAsync();
@@ -718,15 +682,15 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     /**
      * Keeps the shared live-collision overlay in step with the config flag and the loaded scene, and
-     * proactively recalculates the walker's route when a mid-scene change has blocked the road ahead.
+     * publishes a blocked-edge observation when a mid-scene change has blocked the road ahead.
      * Runs on the client thread from {@link #onGameTick}. Rebuilds the immutable snapshot only when the
      * scene base changes (a reload) or an object changed since the last rebuild.
      */
     void refreshLiveCollision() {
-        if (pathfinderConfig == null) {
+        if (Rs2PathApi.getPathfinderConfig() == null) {
             return;
         }
-        final LiveCollisionOverlay overlay = pathfinderConfig.getLiveCollisionOverlay();
+        final LiveCollisionOverlay overlay = Rs2PathApi.getPathfinderConfig().getLiveCollisionOverlay();
         final boolean enabled = config.useLiveCollision();
         if (enabled != overlay.isEnabled()) {
             overlay.setEnabled(enabled);
@@ -804,24 +768,25 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     }
 
     /**
-     * If the walker is mid-route and live collision now blocks a walking step within the look-ahead,
-     * restart pathfinding so it routes around before stalling into the block. Cooldown-gated. Openable
+     * If navigation is mid-route and live collision now blocks a walking step within the look-ahead,
+     * notify the engine so it can recover before stalling into the block. Cooldown-gated. Openable
      * doors and transports are skipped by {@link LiveRouteValidator} (door edges are unknown in the
      * overlay, transport jumps are non-adjacent), so this does not fight the runtime door handler.
      */
     private boolean validateRouteAgainstLiveCollision(LiveCollisionOverlay overlay) {
-        if (overlay.current() == null || Rs2Walker.getCurrentTarget() == null) {
+        NavigationSnapshot snapshot = getNavigationSnapshot();
+        if (overlay.current() == null || snapshot == null || snapshot.isTerminal()) {
             return true;
         }
         final long now = System.currentTimeMillis();
         if (now - lastLiveRecalcMs < LIVE_RECALC_COOLDOWN_MS) {
             return false;
         }
-        final Pathfinder pf = ShortestPathPlugin.pathfinder;
-        if (pf == null || !pf.isDone()) {
+        final RoutePlan publishedPlan = getRoutePlan();
+        if (publishedPlan == null) {
             return false;
         }
-        final List<WorldPoint> path = pf.getPath();
+        final List<WorldPoint> path = publishedPlan.getRawPath();
         if (path == null || path.size() < 2) {
             return true;
         }
@@ -830,15 +795,17 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
             return false;
         }
 
-        final CollisionMap map = pathfinderConfig.getMap();
+        final CollisionMap map = Rs2PathApi.getPathfinderConfig().getMap();
         map.beginSearch(); // pin the freshly captured snapshot for this validation
         final int from = LiveRouteValidator.nearestIndex(path, me);
         final int blocked = LiveRouteValidator.firstBlockedStep(path, from, LIVE_RECALC_LOOKAHEAD, map);
         if (blocked >= 0) {
             lastLiveRecalcMs = now;
-            log.debug("[LiveCollision] route step {} -> {} now blocked; recalculating",
-                    path.get(blocked), path.get(blocked + 1));
-            Rs2Walker.recalculatePath();
+            boolean engineQueued = NavigationEngineRuntime.reportBlockedEdge(
+                    publishedPlan.getGeneration(), blocked);
+            log.debug("[LiveCollision] route step {} -> {} now blocked; recoveryOwner={}",
+                    path.get(blocked), path.get(blocked + 1), engineQueued ? "engine" : "pending");
+            return engineQueued;
         }
         return true;
     }
@@ -846,56 +813,92 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     @Subscribe
     public void onGameTick(GameTick tick) {
         handlePendingLoginRefresh();
+        Rs2NpcDialogueTransportScene.observeFossilRowboatMenu();
         refreshLiveCollision();
+        syncTargetMarker();
 
-        if (Rs2Walker.getCurrentTarget() != null) {
+        if (NavigationWalkRuntime.getTarget() != null) {
             return;
         }
 
         final WorldPoint myLoc = Rs2Player.getWorldLocation();
-        final Pathfinder pathfinder = ShortestPathPlugin.pathfinder;
-        if (myLoc == null || pathfinder == null || !pathfinder.isDone()) {
+        final RoutePlan routePlan = getRoutePlan();
+        if (myLoc == null || routePlan == null) {
             return;
         }
 
-        final List<WorldPoint> path = pathfinder.getPath();
-        if (path == null) return;
+        final List<WorldPoint> path = routePlan.getRawPath();
+        if (path == null || path.isEmpty()) return;
 
-        for (WorldPoint target : pathfinder.getTargets()) {
+        for (WorldPoint target : routePlan.getTargets()) {
+            int reachedDistance = Rs2PathApi.getReachedDistance();
             if (myLoc.distanceTo(target) < reachedDistance
                     && Rs2Tile.getReachableTilesFromTile(myLoc, reachedDistance).containsKey(path.get(path.size() - 1))) {
                 setTarget(null);
-                if (Microbot.getClientThread().scheduledFuture != null) {
-                    Microbot.getClientThread().scheduledFuture.cancel(true);
-                }
             }
+        }
+    }
+
+    NavigationSnapshot getNavigationSnapshot() {
+        return NavigationEngineRuntime.getSnapshot();
+    }
+
+    RoutePlan getRoutePlan() {
+        return NavigationPresentation.activePlan(getNavigationSnapshot(),
+                RoutePlannerRuntime.getPublishedPlan());
+    }
+
+    private void syncTargetMarker() {
+        NavigationSnapshot snapshot = getNavigationSnapshot();
+        WorldPoint target = NavigationPresentation.target(snapshot);
+        WorldMapPoint current = Rs2PathApi.getMarker();
+        if (target == null) {
+            clearTargetMarker();
+            return;
+        }
+        if (current != null && target.equals(current.getWorldPoint())) {
+            return;
+        }
+        clearTargetMarker();
+        WorldMapPoint next = new WorldMapPoint(target, MARKER_IMAGE);
+        next.setName("Target");
+        next.setTarget(target);
+        next.setJumpOnClick(true);
+        Rs2PathApi.setMarker(next);
+        worldMapPointManager.add(next);
+    }
+
+    private void clearTargetMarker() {
+        WorldMapPoint current = Rs2PathApi.getMarker();
+        if (current != null) {
+            worldMapPointManager.remove(current);
+            Rs2PathApi.setMarker(null);
         }
     }
 
     @Subscribe
     public void onMenuEntryAdded(MenuEntryAdded event) {
+        final RoutePlan routePlan = getRoutePlan();
         if (client.isKeyPressed(KeyCode.KC_SHIFT)
                 && event.getType() == MenuAction.WALK.getId()) {
             addMenuEntry(event, SET, TARGET, 1);
-            if (pathfinder != null) {
-                if (!pathfinder.getTargets().isEmpty()) {
+            if (routePlan != null) {
+                if (!routePlan.getTargets().isEmpty()) {
                     addMenuEntry(event, SET, TARGET + ColorUtil.wrapWithColorTag(" " +
-                            (pathfinder.getTargets().size() + 1), JagexColors.MENU_TARGET), 1);
+                            (routePlan.getTargets().size() + 1), JagexColors.MENU_TARGET), 1);
                 }
-                for (WorldPoint target : pathfinder.getTargets()) {
+                for (WorldPoint target : routePlan.getTargets()) {
                     if (target != null) {
                         addMenuEntry(event, SET, START, 1);
                         break;
                     }
                 }
                 WorldPoint selectedTile = getSelectedWorldPoint();
-                if (pathfinder.isDone() && pathfinder.getPath() != null) {
-                    for (WorldPoint tile : pathfinder.getPath()) {
+                for (WorldPoint tile : routePlan.getRawPath()) {
                         if (tile.equals(selectedTile)) {
                             addMenuEntry(event, CLEAR, PATH, 1);
                             break;
                         }
-                    }
                 }
             }
         }
@@ -910,13 +913,12 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
             if (Microbot.isDebug()) {
                 addMenuEntry(event, SET, TEST, 0);
             }
-            final Pathfinder pathfinder = ShortestPathPlugin.pathfinder;
-            if (pathfinder != null) {
-                if (!pathfinder.getTargets().isEmpty()) {
+            if (routePlan != null) {
+                if (!routePlan.getTargets().isEmpty()) {
                     addMenuEntry(event, SET, TARGET + ColorUtil.wrapWithColorTag(" " +
-                            (pathfinder.getTargets().size() + 1), JagexColors.MENU_TARGET), 0);
+                            (routePlan.getTargets().size() + 1), JagexColors.MENU_TARGET), 0);
                 }
-                for (WorldPoint target : pathfinder.getTargets()) {
+                for (WorldPoint target : routePlan.getTargets()) {
                     if (target != null) {
                         addMenuEntry(event, SET, START, 0);
                         addMenuEntry(event, CLEAR, PATH, 0);
@@ -927,26 +929,22 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
         final Shape minimap = getMinimapClipArea();
 
-        if (minimap != null && pathfinder != null
+        if (minimap != null && routePlan != null
                 && minimap.contains(
                 client.getMouseCanvasPosition().getX(),
                 client.getMouseCanvasPosition().getY())) {
             addMenuEntry(event, CLEAR, PATH, 0);
         }
 
-        if (minimap != null && pathfinder != null
+        if (minimap != null && routePlan != null
                 && ("Floating World Map".equals(Text.removeTags(event.getOption()))
                 || "Close Floating panel".equals(Text.removeTags(event.getOption())))) {
             addMenuEntry(event, CLEAR, PATH, 1);
         }
     }
 
-    public static Map<WorldPoint, Set<Transport>> getTransports() {
-        return pathfinderConfig.getTransports();
-    }
-
     public CollisionMap getMap() {
-        return pathfinderConfig.getMap();
+        return Rs2PathApi.getPathfinderConfig().getMap();
     }
 
 	public static boolean override(String configOverrideKey, boolean defaultValue) {
@@ -1021,7 +1019,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
     private void onMenuOptionClicked(MenuEntry entry) {
         if (entry.getOption().equals(SET) && entry.getTarget().equals(TARGET)) {
             WorldPoint worldPoint = getSelectedWorldPoint();
-            shortestPathScript.setTriggerWalker(worldPoint);
+            startWalking(worldPoint);
         }
         if (entry.getOption().equals(SET) && entry.getTarget().equals(TEST)) {
             //For debugging you can use setTarget, it will calculate path without walking
@@ -1034,8 +1032,18 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         }
 
         if (entry.getOption().equals(CLEAR) && entry.getTarget().equals(PATH)) {
-			shortestPathScript.setTriggerWalker(null);
+			stopWalking("shortest-path-ui:clear-path");
         }
+    }
+
+    void startWalking(WorldPoint target) {
+        if (target != null) {
+            NavigationWalkRuntime.start(target, config.walkWithBankedTransports());
+        }
+    }
+
+    void stopWalking(String reason) {
+        NavigationWalkRuntime.cancel(reason);
     }
 
     private WorldPoint getSelectedWorldPoint() {
@@ -1076,35 +1084,21 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
 
     private void setTargets(Set<WorldPoint> targets, boolean append) {
         if (targets == null || targets.isEmpty()) {
-            synchronized (pathfinderMutex) {
-                if (pathfinder != null) {
-                    pathfinder.cancel();
-                }
-                pathfinder = null;
-            }
-
-            worldMapPointManager.removeIf(x -> x == marker);
-            marker = null;
-            startPointSet = false;
+            RoutePlannerRuntime.cancel();
+            Rs2PathApi.setStartPointSet(false);
+            syncTargetMarker();
         } else {
             Player localPlayer = client.getLocalPlayer();
-            if (!startPointSet && localPlayer == null) {
+            if (!Rs2PathApi.isStartPointSet() && localPlayer == null) {
                 return;
             }
-            worldMapPointManager.removeIf(x -> x == marker);
-            if (targets.size() == 1) {
-                marker = new WorldMapPoint(targets.iterator().next(), MARKER_IMAGE);
-                marker.setName("Target");
-                marker.setTarget(marker.getWorldPoint());
-                marker.setJumpOnClick(true);
-                worldMapPointManager.add(marker);
-            }
 
-            final Pathfinder pathfinder = ShortestPathPlugin.pathfinder;
+            final RoutePlan routePlan = getRoutePlan();
             final WorldPoint start;
-            if (startPointSet && pathfinder != null) {
-                start = pathfinder.getStart();
-                lastLocation = WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation());
+            if (Rs2PathApi.isStartPointSet() && routePlan != null) {
+                start = routePlan.getStart();
+                Rs2PathApi.setLastLocation(WorldPoint.fromLocalInstance(client,
+                        localPlayer.getLocalLocation()));
             } else {
                 WorldPoint rawStart = WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation());
                 // When the player is inside a POH instance, the raw instance-template tile
@@ -1126,22 +1120,23 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
                 } else {
                     start = rawStart;
                 }
-                lastLocation = start;
+                Rs2PathApi.setLastLocation(start);
             }
             final Set<WorldPoint> destinations = new HashSet<>(targets);
-            if (pathfinder != null && append) {
-                destinations.addAll(pathfinder.getTargets());
+            if (routePlan != null && append) {
+                destinations.addAll(routePlan.getTargets());
             }
-            restartPathfinding(start, destinations, append);
+            restartPathfinding(start, destinations, append, true);
         }
     }
 
     private void setStart(WorldPoint start) {
-        if (pathfinder == null) {
+        RoutePlan routePlan = getRoutePlan();
+        if (routePlan == null) {
             return;
         }
-        startPointSet = true;
-        restartPathfinding(start, pathfinder.getTargets());
+        Rs2PathApi.setStartPointSet(true);
+        restartPathfinding(start, routePlan.getTargets());
     }
 
     public WorldPoint calculateMapPoint(Point point) {
@@ -1322,7 +1317,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
             Microbot.log("WebWalker: no " + categoryName + " selected in the panel.");
             return;
         }
-        WorldPoint current = shortestPathScript.getTriggerWalker();
+        WorldPoint current = NavigationWalkRuntime.getTarget();
         if (target.equals(current)) {
             p.stopWalking();
         } else {
@@ -1347,7 +1342,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
          * Therefor CTRL + X seemed a bit more robust and userfriendly
          */
         if (e.getKeyCode() == KeyEvent.VK_X && e.isControlDown()) {
-			shortestPathScript.setTriggerWalker(null);
+			stopWalking("hotkey:ctrl+x");
             e.consume();
         }
     }
@@ -1375,7 +1370,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         @Override
         public void hotkeyPressed() {
             if (panel == null || !Microbot.isLoggedIn()) return;
-            if (shortestPathScript.getTriggerWalker() != null) {
+            if (NavigationWalkRuntime.getTarget() != null) {
                 panel.stopWalking();
             } else {
                 panel.startWalkingNearestBank();
@@ -1394,7 +1389,7 @@ public class ShortestPathPlugin extends Plugin implements KeyListener {
         @Override
         public void hotkeyPressed() {
             if (panel == null || !Microbot.isLoggedIn()) return;
-            if (shortestPathScript.getTriggerWalker() != null) {
+            if (NavigationWalkRuntime.getTarget() != null) {
                 panel.stopWalking();
             } else {
                 panel.startWalkingNearestDepositBox();

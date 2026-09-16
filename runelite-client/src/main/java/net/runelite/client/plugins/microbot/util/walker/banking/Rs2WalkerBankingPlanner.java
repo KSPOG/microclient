@@ -6,6 +6,7 @@ import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.Pathfinder;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.policy.TransportRequirementPolicy;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spells;
 import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
@@ -16,6 +17,7 @@ import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.bank.enums.BankLocation;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.magic.RuneFilter;
 import net.runelite.client.plugins.microbot.util.magic.Runes;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.walker.TransportRouteAnalysis;
@@ -23,8 +25,11 @@ import net.runelite.client.plugins.microbot.util.walker.WebWalkLog;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -82,9 +87,34 @@ public final class Rs2WalkerBankingPlanner {
         if (transport == null || transport.getType() != TransportType.TRANSPORT) {
             return false;
         }
-        return transport.getCurrencyAmount() > 0
-                || (transport.getItemIdRequirements() != null && !transport.getItemIdRequirements().isEmpty());
+        return TransportRequirementPolicy.currencyAmount(transport) > 0
+                || !TransportRequirementPolicy.itemIdRequirements(transport).isEmpty()
+				|| !TransportRequirementPolicy.additionalReusableItemIds(transport).isEmpty();
     }
+
+	/** Shared inclusion boundary for route analysis and missing-item planning. */
+	public static boolean requiresBankPlanning(Transport transport) {
+		if (transport == null) {
+			return false;
+		}
+		switch (transport.getType()) {
+			case TELEPORTATION_ITEM:
+			case TELEPORTATION_SPELL:
+			case SEASONAL_TRANSPORT:
+			case FAIRY_RING:
+			case CANOE:
+			case BOAT:
+			case CHARTER_SHIP:
+			case SHIP:
+			case MINECART:
+			case MAGIC_CARPET:
+			case HOT_AIR_BALLOON:
+			case SPIRIT_TREE:
+				return true;
+			default:
+				return planningCoversPlainTransport(transport);
+		}
+	}
 
     public static boolean hasRequiredTransportItems(Transport transport) {
         if (transport == null) {
@@ -99,12 +129,14 @@ public final class Rs2WalkerBankingPlanner {
                     || Microbot.getVarbitValue(VarbitID.LUMBRIDGE_DIARY_ELITE_COMPLETE) == 1;
         } else if (transport.getType() == TransportType.TELEPORTATION_ITEM
                 || transport.getType() == TransportType.TELEPORTATION_SPELL
+				|| transport.getType() == TransportType.SEASONAL_TRANSPORT
                 || transport.getType() == TransportType.CANOE
                 || transport.getType() == TransportType.BOAT
                 || transport.getType() == TransportType.CHARTER_SHIP
                 || transport.getType() == TransportType.SHIP
                 || transport.getType() == TransportType.MINECART
                 || transport.getType() == TransportType.MAGIC_CARPET
+				|| transport.getType() == TransportType.HOT_AIR_BALLOON
                 || planningCoversPlainTransport(transport)) {
             if (transport.getType() == TransportType.TELEPORTATION_SPELL && transport.getDisplayInfo() != null) {
                 String spellName = transport.getDisplayInfo().contains(":")
@@ -116,24 +148,33 @@ public final class Rs2WalkerBankingPlanner {
                         : transport.getDisplayInfo();
                 log.debug("Looking for spell rune requirements for: '{}' - display info {}", spellName, displayInfo);
                 Rs2Spells rs2Spell = Rs2Magic.getRs2Spell(displayInfo);
-                return Rs2Magic.hasRequiredRunes(rs2Spell);
+                return Rs2Magic.hasRequiredRunes(rs2Spell)
+                        || rs2Spell != null && Rs2Walker.config != null
+                        && net.runelite.client.plugins.microbot.util.walker.transport.SimpleTeleportPolicy.isEligible(transport)
+                        && Rs2SpellEquipmentScene.plan(List.of(getSpellRequirements(transport)), false) != null;
             }
+            int currencyAmount = TransportRequirementPolicy.currencyAmount(transport);
+            String currencyName = TransportRequirementPolicy.currencyName(transport);
             if (isCurrencyBasedTransport(transport.getType())
-                    && (transport.getItemIdRequirements() == null || transport.getItemIdRequirements().isEmpty())
-                    && transport.getCurrencyName() != null
-                    && !transport.getCurrencyName().isEmpty()
-                    && transport.getCurrencyAmount() > 0) {
-                int currencyItemId = getCurrencyItemId(transport.getCurrencyName());
-                return Rs2Inventory.count(currencyItemId) >= transport.getCurrencyAmount();
+                    && currencyName != null
+                    && !currencyName.isEmpty()
+                    && currencyAmount > 0) {
+                int currencyItemId = getCurrencyItemId(currencyName);
+                if (currencyItemId <= 0 || Rs2Inventory.count(currencyItemId) < currencyAmount) {
+                    return false;
+                }
             }
-            if (transport.getItemIdRequirements() == null || transport.getItemIdRequirements().isEmpty()) {
-                return true;
-            }
-
-            return transport.getItemIdRequirements()
+            Set<Set<Integer>> itemRequirements =
+                    TransportRequirementPolicy.itemIdRequirements(transport);
+			boolean primaryReady = itemRequirements.isEmpty() || itemRequirements
                     .stream()
                     .flatMap(Collection::stream)
                     .anyMatch(itemId -> Rs2Equipment.isWearing(itemId) || Rs2Inventory.hasItem(itemId));
+			Set<Integer> additional =
+					TransportRequirementPolicy.additionalReusableItemIds(transport);
+			return primaryReady && (additional.isEmpty() || additional.stream()
+					.anyMatch(itemId -> Rs2Equipment.isWearing(itemId)
+							|| Rs2Inventory.hasItem(itemId)));
         }
 
         return true;
@@ -154,101 +195,278 @@ public final class Rs2WalkerBankingPlanner {
             return new HashMap<>();
         }
 
-        Map<Integer, Integer> itemQuantityMap = new HashMap<>();
+        Map<Integer, Integer> exactWithdrawals = new HashMap<>();
+        Map<Integer, Integer> fungibleRequirements = new HashMap<>();
+        Map<Set<Integer>, Integer> consumableAlternatives = new HashMap<>();
+        Set<Set<Integer>> reusableAlternatives = new HashSet<>();
+        List<Map<Runes, Integer>> spellRequirements = new ArrayList<>();
 
-        transports.forEach(transport -> {
+        transports.stream().filter(Rs2WalkerBankingPlanner::requiresBankPlanning).forEach(transport -> {
             if (transport.getType() == TransportType.TELEPORTATION_SPELL) {
-                Map<Integer, Integer> spellRuneRequirements = getSpellRuneRequirements(transport);
-                if (!spellRuneRequirements.isEmpty()) {
-                    spellRuneRequirements.forEach((runeItemId, requiredQuantity) -> {
-                        try {
-                            int bankQuantity = Rs2Bank.count(runeItemId);
-                            int currentQuantity = itemQuantityMap.getOrDefault(runeItemId, 0);
-                            itemQuantityMap.put(runeItemId, currentQuantity + requiredQuantity);
-                            log.debug("Added teleportation spell rune requirement: {} (ID: {}) x{} (bank has: {} short={})",
-                                    runeItemId, runeItemId, requiredQuantity, bankQuantity, bankQuantity < requiredQuantity);
-                        } catch (Exception e) {
-                            log.debug("Could not check bank for rune " + runeItemId + ": " + e.getMessage());
-                        }
-                    });
-                }
+                spellRequirements.add(getSpellRequirements(transport));
                 return;
             }
 
-            // Pure currency transports (charter fares, magic carpets, the Shantay 5-coin gate row) have
-            // EMPTY itemIdRequirements, so the item loop below never runs for them — their coins were
-            // never added to the withdrawal map. The transport was correctly detected as missing, but the
-            // fare was never fetched: the post-bank replan (inventory-only) then dropped the transport and
-            // produced the long overland route ("banked walking does not withdraw gold"). Sum fares across
-            // every currency transport on the route.
-            if (isCurrencyBasedTransport(transport.getType())
-                    && transport.getCurrencyAmount() > 0
-                    && (transport.getItemIdRequirements() == null || transport.getItemIdRequirements().isEmpty())) {
-                int currencyItemId = getCurrencyItemId(transport.getCurrencyName());
+            if (transport.getType() == TransportType.FAIRY_RING
+                    && Microbot.getVarbitValue(VarbitID.LUMBRIDGE_DIARY_ELITE_COMPLETE) != 1) {
+                reusableAlternatives.add(Set.of(
+                        ItemID.DRAMEN_STAFF, ItemID.LUNAR_MOONCLAN_LIMINAL_STAFF));
+                return;
+            }
+
+            int currencyAmount = TransportRequirementPolicy.currencyAmount(transport);
+            String currencyName = TransportRequirementPolicy.currencyName(transport);
+            if (isCurrencyBasedTransport(transport.getType()) && currencyAmount > 0) {
+                int currencyItemId = getCurrencyItemId(currencyName);
                 if (currencyItemId > 0) {
-                    int currentQuantity = itemQuantityMap.getOrDefault(currencyItemId, 0);
-                    itemQuantityMap.put(currencyItemId, currentQuantity + transport.getCurrencyAmount());
-                    log.debug("Added currency fare requirement: itemId={} x{} for {}",
-                            currencyItemId, transport.getCurrencyAmount(), transport.getType());
+                    fungibleRequirements.merge(
+                            currencyItemId, currencyAmount, Integer::sum);
                 }
-                return;
             }
 
-            if (transport.getItemIdRequirements() != null) {
-                for (Set<Integer> alternativeItems : transport.getItemIdRequirements()) {
-                    int requiredQuantity = (isCurrencyBasedTransport(transport.getType()) && transport.getCurrencyAmount() > 0)
-                            ? transport.getCurrencyAmount()
-                            : 1;
-
-                    Integer preferredItemId = null;
-                    int preferredBankQuantity = 0;
-                    for (Integer itemId : alternativeItems) {
-                        int bankQuantity = 0;
-                        try {
-                            bankQuantity = Rs2Bank.count(itemId);
-                        } catch (Exception e) {
-                            log.debug("Could not check bank for item " + itemId + ": " + e.getMessage());
-                        }
-                        if (preferredItemId == null || bankQuantity > preferredBankQuantity) {
-                            preferredItemId = itemId;
-                            preferredBankQuantity = bankQuantity;
-                        }
+            Set<Set<Integer>> itemRequirements =
+                    TransportRequirementPolicy.itemIdRequirements(transport);
+            if (!itemRequirements.isEmpty()) {
+                Set<Integer> alternatives = itemRequirements.stream()
+                        .filter(java.util.Objects::nonNull)
+                        .flatMap(Collection::stream)
+                        .collect(Collectors.toSet());
+                if (!alternatives.isEmpty()) {
+                    // PathfinderConfig and hasRequiredTransportItems both treat every encoded
+                    // item ID as an OR alternative. Preserve that exact boundary here: charged
+                    // jewellery and trimmed/untrimmed capes are variants of one requirement,
+                    // not several independent items to withdraw.
+					if (transport.isConsumable() && !isReusableItemContainer(transport)) {
+                        consumableAlternatives.merge(alternatives, 1, Integer::sum);
+                    } else {
+                        reusableAlternatives.add(alternatives);
                     }
-
-                    // The bank holds none of the alternatives — withdrawing the item is impossible.
-                    // If one of them is vendor-purchasable at its transport (the Shantay pass
-                    // pattern), withdraw the fare instead so the buy-at-transport step can run.
-                    if (preferredItemId != null && preferredBankQuantity == 0) {
-                        PurchasableItemCatalog.PurchasableItem purchasable = alternativeItems.stream()
-                                .map(PurchasableItemCatalog::byItemId)
-                                .filter(java.util.Objects::nonNull)
-                                .findFirst()
-                                .orElse(null);
-                        int currencyItemId = purchasable == null ? -1 : getCurrencyItemId(purchasable.costCurrencyName);
-                        if (currencyItemId > 0) {
-                            // One fare per required ITEM. requiredQuantity above is a currency
-                            // amount for currency-based rows, so it must not be used as a count.
-                            int itemsNeeded = isCurrencyBasedTransport(transport.getType()) ? 1 : requiredQuantity;
-                            int fare = purchasable.costAmount * itemsNeeded;
-                            itemQuantityMap.merge(currencyItemId, fare, Integer::sum);
-                            log.debug("Transport item {} not banked but purchasable — withdrawing fare {} x{} instead",
-                                    purchasable.itemId, purchasable.costCurrencyName, fare);
-                            break;
-                        }
-                    }
-                    if (preferredItemId != null) {
-                        int currentQuantity = itemQuantityMap.getOrDefault(preferredItemId, 0);
-                        itemQuantityMap.put(preferredItemId, currentQuantity + requiredQuantity);
-                        log.debug("Added transport item requirement: itemId={} x{} (bank has: {} short={})",
-                                preferredItemId, requiredQuantity, preferredBankQuantity, preferredBankQuantity < requiredQuantity);
-                    }
-                    break;
                 }
+            }
+			Set<Integer> additional =
+					TransportRequirementPolicy.additionalReusableItemIds(transport);
+			if (!additional.isEmpty()) {
+				reusableAlternatives.add(additional);
+			}
+        });
+
+        boolean staffExecutionSupported = transports.stream()
+                .filter(transport -> transport != null && transport.getType() == TransportType.TELEPORTATION_SPELL)
+                .allMatch(net.runelite.client.plugins.microbot.util.walker.transport.SimpleTeleportPolicy::isEligible);
+        addSpellWithdrawals(spellRequirements, exactWithdrawals, staffExecutionSupported);
+        consumableAlternatives.forEach((alternatives, uses) ->
+                addAlternativeWithdrawal(alternatives, uses, exactWithdrawals, fungibleRequirements));
+        reusableAlternatives.forEach(alternatives ->
+                addAlternativeWithdrawal(alternatives, 1, exactWithdrawals, fungibleRequirements));
+
+        fungibleRequirements.forEach((itemId, required) -> {
+            int shortfall = amountToWithdraw(required, Rs2Inventory.itemQuantity(itemId));
+            if (shortfall > 0) {
+                exactWithdrawals.merge(itemId, shortfall, Integer::sum);
             }
         });
 
-        return itemQuantityMap;
+        Map<Integer, Integer> itemQuantityMap = new HashMap<>();
+        exactWithdrawals.forEach((itemId, withdrawal) -> {
+            if (withdrawal > 0) {
+                // The coordinator accepts total required quantities and subtracts the inventory
+                // count immediately before withdrawal. Encode the exact planned shortfall without
+                // losing items already carried under this same ID.
+                itemQuantityMap.put(itemId, Rs2Inventory.itemQuantity(itemId) + withdrawal);
+            }
+        });
+		return itemQuantityMap;
+	}
+
+	private static boolean isReusableItemContainer(Transport transport) {
+		return transport.getType() == TransportType.TELEPORTATION_ITEM
+				&& transport.getDisplayInfo() != null
+				&& ((transport.getDisplayInfo().startsWith("Master Scroll Book:")
+						&& transport.getItemIdRequirements().equals(
+								Set.of(Set.of(ItemID.BOOKOFSCROLLS_CHARGED))))
+					|| (transport.getDisplayInfo().equals("Chronicle: Teleport")
+						&& transport.getItemIdRequirements().equals(
+								Set.of(Set.of(ItemID.CHRONICLE))))
+					|| (transport.getDisplayInfo().startsWith("Pharaoh's sceptre:")
+						&& transport.getItemIdRequirements().equals(
+								Set.of(Set.of(26948), Set.of(26950))))
+					|| (transport.getDisplayInfo().startsWith("Quetzal whistle:")
+						&& transport.getItemIdRequirements().equals(Set.of(
+							Set.of(ItemID.HG_QUETZALWHISTLE_BASIC),
+							Set.of(ItemID.HG_QUETZALWHISTLE_ENHANCED),
+							Set.of(ItemID.HG_QUETZALWHISTLE_PERFECTED)))));
+	}
+
+    private static void addAlternativeWithdrawal(Set<Integer> alternatives, int requiredUses,
+            Map<Integer, Integer> exactWithdrawals, Map<Integer, Integer> fungibleRequirements) {
+        int carried = alternatives.stream().mapToInt(itemId ->
+                Rs2Inventory.itemQuantity(itemId) + (Rs2Equipment.isWearing(itemId) ? 1 : 0)).sum();
+        int shortfall = amountToWithdraw(requiredUses, carried);
+        if (shortfall == 0) {
+            return;
+        }
+
+        Map<Integer, Integer> bankQuantities = new HashMap<>();
+        alternatives.forEach(itemId -> bankQuantities.put(itemId, safeBankCount(itemId)));
+        List<Integer> rankedAlternatives = alternatives.stream()
+                .sorted(Comparator
+                        .comparingInt((Integer itemId) -> bankQuantities.get(itemId))
+                        .reversed()
+                        .thenComparingInt(Integer::intValue))
+                .collect(Collectors.toList());
+
+        int remaining = shortfall;
+        for (Integer itemId : rankedAlternatives) {
+            int amount = Math.min(remaining, bankQuantities.get(itemId));
+            if (amount > 0) {
+                exactWithdrawals.merge(itemId, amount, Integer::sum);
+                remaining -= amount;
+            }
+            if (remaining == 0) {
+                return;
+            }
+        }
+
+        if (remaining > 0) {
+            PurchasableItemCatalog.PurchasableItem purchasable = alternatives.stream()
+                    .map(PurchasableItemCatalog::byItemId)
+                    .filter(java.util.Objects::nonNull)
+                    .findFirst()
+                    .orElse(null);
+            int currencyItemId = purchasable == null
+                    ? -1 : getCurrencyItemId(purchasable.costCurrencyName);
+            if (currencyItemId > 0) {
+                fungibleRequirements.merge(
+                        currencyItemId, purchasable.costAmount * remaining, Integer::sum);
+                return;
+            }
+        }
+        if (remaining > 0 && !rankedAlternatives.isEmpty()) {
+            // Keep the unsatisfied remainder explicit. The coordinator preflights each requested
+            // quantity and exits before the final target leg when the bank cannot supply it.
+            exactWithdrawals.merge(rankedAlternatives.get(0), remaining, Integer::sum);
+        }
     }
+
+    private static void addSpellWithdrawals(List<Map<Runes, Integer>> required,
+            Map<Integer, Integer> exactWithdrawals, boolean staffExecutionSupported) {
+        if (required.isEmpty()) {
+            return;
+        }
+        if (staffExecutionSupported && Rs2Walker.config != null
+                && Rs2Walker.config.walkWithBankedTransports() && Rs2Walker.config.useBankedElementalStaffs()) {
+            BankedSpellEquipmentPlanner.Plan selected = Rs2SpellEquipmentScene.plan(required, true);
+            if (selected != null) {
+                selected.getRuneWithdrawals().forEach((itemId, amount) ->
+                        exactWithdrawals.merge(itemId, amount, Integer::sum));
+                int staffId = selected.getStaff().getItemID();
+                if (staffId > 0 && !Rs2Equipment.isWearing(staffId) && !Rs2Inventory.hasItem(staffId)) {
+                    exactWithdrawals.merge(staffId, 1, Math::max);
+                }
+                return;
+            }
+        }
+        Map<Runes, Integer> available;
+        try {
+            available = Rs2Magic.getRunes(RuneFilter.builder()
+                    .includeBank(false).includeComboRunes(false).build());
+        } catch (RuntimeException ex) {
+            available = Map.of();
+        }
+        final Map<Runes, Integer> availableRunes = available;
+
+        Map<Runes, Integer> bankRemaining = new EnumMap<>(Runes.class);
+        for (Runes rune : Runes.values()) {
+            bankRemaining.put(rune, safeBankCount(rune.getItemId()));
+        }
+        planRuneWithdrawals(required, availableRunes, bankRemaining).forEach(
+                (itemId, quantity) -> exactWithdrawals.merge(itemId, quantity, Integer::sum));
+    }
+
+    static Map<Integer, Integer> planRuneWithdrawals(Map<Runes, Integer> required,
+            Map<Runes, Integer> available, Map<Runes, Integer> bankQuantities) {
+        return planRuneWithdrawals(List.of(required), available, bankQuantities);
+    }
+
+    static Map<Integer, Integer> planRuneWithdrawals(List<Map<Runes, Integer>> casts,
+            Map<Runes, Integer> available, Map<Runes, Integer> bankQuantities) {
+        Map<Integer, Integer> withdrawals = new HashMap<>();
+        Map<Runes, Integer> remaining = new EnumMap<>(Runes.class);
+        Map<Runes, Integer> consumed = new EnumMap<>(Runes.class);
+        for (Runes rune : Runes.values()) {
+            long quantity = (long) Math.max(0, available.getOrDefault(rune, 0))
+                    + Math.max(0, bankQuantities.getOrDefault(rune, 0));
+            remaining.put(rune, (int) Math.min(Integer.MAX_VALUE, quantity));
+        }
+
+        for (Map<Runes, Integer> cast : casts) {
+            Map<Runes, Integer> deficits = new EnumMap<>(Runes.class);
+            cast.forEach((rune, quantity) -> {
+                if (quantity > 0 && available.getOrDefault(rune, 0) != Integer.MAX_VALUE) {
+                    deficits.put(rune, quantity);
+                }
+            });
+            while (!deficits.isEmpty()) {
+                Runes best = null;
+                int bestCoverage = 0;
+                int bestQuantity = 0;
+                boolean bestCombination = false;
+                for (Runes candidate : Runes.values()) {
+                    int quantity = remaining.getOrDefault(candidate, 0);
+                    if (quantity <= 0) continue;
+                    int coverage = (int) deficits.keySet().stream()
+                            .filter(candidate::providesRune).count();
+                    if (coverage == 0) continue;
+                    boolean combination = candidate.getBaseRunes().length > 0;
+                    // All withdrawals are carried before the first cast: a combination rune
+                    // fetched for a later spell can also be consumed by an earlier spell.
+                    if (best == null || (combination && !bestCombination)
+                            || (combination == bestCombination && (coverage > bestCoverage
+                            || (coverage == bestCoverage && quantity > bestQuantity)))) {
+                        best = candidate;
+                        bestCoverage = coverage;
+                        bestQuantity = quantity;
+                        bestCombination = combination;
+                    }
+                }
+                if (best == null) {
+                    // Retain unsatisfied requirements so withdrawal validation exits before
+                    // the target leg, rather than treating an exhausted supply as success.
+                    deficits.forEach((rune, quantity) ->
+                            withdrawals.merge(rune.getItemId(), quantity, Integer::sum));
+                    break;
+                }
+                final Runes selected = best;
+                int amount = deficits.entrySet().stream()
+                        .filter(entry -> selected.providesRune(entry.getKey()))
+                        .mapToInt(Map.Entry::getValue).max().orElse(0);
+                amount = Math.min(amount, remaining.get(selected));
+                remaining.put(selected, remaining.get(selected) - amount);
+                consumed.merge(selected, amount, Integer::sum);
+                int supplied = amount;
+                deficits.replaceAll((rune, quantity) -> selected.providesRune(rune)
+                        ? Math.max(0, quantity - supplied) : quantity);
+                deficits.entrySet().removeIf(entry -> entry.getValue() == 0);
+            }
+        }
+        consumed.forEach((rune, quantity) -> {
+            int missing = amountToWithdraw(quantity, available.getOrDefault(rune, 0));
+            if (missing > 0) withdrawals.merge(rune.getItemId(), missing, Integer::sum);
+        });
+        return withdrawals;
+    }
+
+    private static int safeBankCount(int itemId) {
+        try {
+            return Rs2Bank.count(itemId);
+        } catch (RuntimeException ex) {
+            return 0;
+        }
+    }
+
+	public static int amountToWithdraw(int requiredQuantity, int inventoryQuantity) {
+		return Math.max(0, requiredQuantity - inventoryQuantity);
+	}
 
     public static List<Integer> getMissingTransportItemIds(List<Transport> transports) {
         return new ArrayList<>(getMissingTransportItemIdsWithQuantities(transports).keySet());
@@ -277,9 +495,9 @@ public final class Rs2WalkerBankingPlanner {
             long directPathEndTime = System.nanoTime();
             double directPathTimeMs = (directPathEndTime - directPathStartTime) / 1_000_000.0;
 
-            int directDistance = Rs2Walker.getTotalTilesFromPath(directPath, target);
+            int directDistance = Rs2Walker.getTotalTravelTicksFromPath(directPath, target);
             performanceLog.append("\t-Direct path calculation: ").append(String.format("%.2f ms", directPathTimeMs))
-                    .append(" (").append(directPath.size()).append(" waypoints, ").append(directDistance).append(" tiles)\n");
+                    .append(" (").append(directPath.size()).append(" waypoints, ").append(directDistance).append(" ticks)\n");
 
             BankLocation nearestBank = null;
             List<WorldPoint> pathToBank = new ArrayList<>();
@@ -308,7 +526,7 @@ public final class Rs2WalkerBankingPlanner {
                         pathToBank = Rs2Walker.getWalkPath(startPoint, bankLocation);
                         long pathToBankEndTime = System.nanoTime();
                         double pathToBankTimeMs = (pathToBankEndTime - pathToBankStartTime) / 1_000_000.0;
-                        int distanceToBank = Rs2Walker.getTotalTilesFromPath(pathToBank, bankLocation);
+                        int distanceToBank = Rs2Walker.getTotalTravelTicksFromPath(pathToBank, bankLocation);
 
                         long pathFromBankStartTime = System.nanoTime();
                         pathFromBankToTarget = Rs2Walker.getWalkPath(bankLocation, target);
@@ -322,13 +540,13 @@ public final class Rs2WalkerBankingPlanner {
                         long itemCount = bankLegTransports.stream()
                                 .filter(t -> t.getType() == TransportType.TELEPORTATION_ITEM)
                                 .count();
-                        int distanceFromBankRaw = Rs2Walker.getTotalTilesFromPath(pathFromBankToTarget, target);
-                        int distanceFromBank = effectiveDistanceFromBank(pathFromBankToTarget, distanceFromBankRaw);
+                        int distanceFromBank = Rs2Walker.getTotalTravelTicksFromPath(
+                                pathFromBankToTarget, target);
 
                         performanceLog.append("\t-Path to bank calculation: ").append(String.format("%.2f ms", pathToBankTimeMs))
-                                .append(" (").append(pathToBank.size()).append(" waypoints, ").append(distanceToBank).append(" tiles)\n");
+                                .append(" (").append(pathToBank.size()).append(" waypoints, ").append(distanceToBank).append(" ticks)\n");
                         performanceLog.append("\t-Path from bank to target with banked items: ").append(String.format("%.2f ms", pathFromBankTimeMs))
-                                .append(" (").append(pathFromBankToTarget.size()).append(" waypoints, ").append(distanceFromBank).append(" tiles)\n");
+                                .append(" (").append(pathFromBankToTarget.size()).append(" waypoints, ").append(distanceFromBank).append(" ticks)\n");
                         performanceLog.append("\t-Bank leg transports: total=").append(bankLegTransports.size())
                                 .append(" spells=").append(spellCount)
                                 .append(" items=").append(itemCount)
@@ -351,21 +569,13 @@ public final class Rs2WalkerBankingPlanner {
                                 firstSpellTransport == null
                                         ? "none"
                                         : firstSpellTransport.getDisplayInfo() + " -> " + firstSpellTransport.getDestination());
-                        if (distanceFromBankRaw != distanceFromBank) {
-                            performanceLog.append("\t-Adjusted bank leg for immediate teleport: raw=")
-                                    .append(distanceFromBankRaw)
-                                    .append(" adjusted=")
-                                    .append(distanceFromBank)
-                                    .append(" tiles\n");
-                        }
-
                         if (distanceToBank != -1
                                 && distanceFromBank != -1
                                 && distanceToBank != Integer.MAX_VALUE
                                 && distanceFromBank != Integer.MAX_VALUE) {
                             bankingRouteDistance = distanceToBank + distanceFromBank;
                         }
-                        performanceLog.append("\t-Total banking route distance: ").append(bankingRouteDistance).append(" tiles\n");
+                        performanceLog.append("\t-Total banking route cost: ").append(bankingRouteDistance).append(" ticks\n");
                     } else {
                         performanceLog.append("\t-Nearest bank search: ").append(String.format("%.2f ms", bankSearchTimeMs))
                                 .append("\t -> No accessible bank found\n");
@@ -398,17 +608,17 @@ public final class Rs2WalkerBankingPlanner {
             final String verdictOneLine;
             if (tie) {
                 if (preferTransportToTarget) {
-                    recommendation = String.format("\tSame tile distance (%d); prefer banking route (prefer transport to target enabled)", directDistance);
+                    recommendation = String.format("\tSame travel cost (%d ticks); prefer banking route (prefer transport to target enabled)", directDistance);
                     verdictOneLine = String.format("tie %dt (prefer bank: transport-to-target)", directDistance);
                 } else {
-                    recommendation = String.format("\tSame tile distance (%d); prefer direct (no bank hop)", directDistance);
+                    recommendation = String.format("\tSame travel cost (%d ticks); prefer direct (no bank hop)", directDistance);
                     verdictOneLine = String.format("tie %dt (prefer direct)", directDistance);
                 }
             } else if (directStrictlyFaster) {
-                recommendation = String.format("\tDirect route is faster (%d vs %d tiles)", directDistance, bankingRouteDistance);
+                recommendation = String.format("\tDirect route is faster (%d vs %d ticks)", directDistance, bankingRouteDistance);
                 verdictOneLine = String.format("direct faster %dt vs %dt", directDistance, bankingRouteDistance);
             } else {
-                recommendation = String.format("\tBanking route is faster (%d vs %d tiles)", bankingRouteDistance, directDistance);
+                recommendation = String.format("\tBanking route is faster (%d vs %d ticks)", bankingRouteDistance, directDistance);
                 verdictOneLine = String.format("bank faster %dt vs %dt", bankingRouteDistance, directDistance);
             }
 
@@ -429,8 +639,8 @@ public final class Rs2WalkerBankingPlanner {
         }
     }
 
-    private static Map<Integer, Integer> getSpellRuneRequirements(Transport transport) {
-        Map<Integer, Integer> runeRequirements = new HashMap<>();
+    private static Map<Runes, Integer> getSpellRequirements(Transport transport) {
+        Map<Runes, Integer> runeRequirements = new EnumMap<>(Runes.class);
         if (transport.getType() != TransportType.TELEPORTATION_SPELL || transport.getDisplayInfo() == null) {
             return runeRequirements;
         }
@@ -447,15 +657,14 @@ public final class Rs2WalkerBankingPlanner {
             if (rs2Spell == null) {
                 return runeRequirements;
             }
-            Map<Runes, Integer> requiredRunes = Rs2Magic.getRequiredRunes(rs2Spell, 1, true);
+            Map<Runes, Integer> requiredRunes = Rs2Magic.getRequiredRunes(rs2Spell, 1);
             List<Runes> elementalRunes = rs2Spell.getElementalRunes();
             log.debug("Spell '{}' requires {} runes, including {} elemental runes",
                     spellName, requiredRunes.size(), elementalRunes.size());
             requiredRunes.forEach((rune, quantity) -> {
-                int runeItemId = rune.getItemId();
-                runeRequirements.put(runeItemId, quantity);
+                runeRequirements.put(rune, quantity);
                 log.debug("Spell '{}' requires {} x {} (ID: {})",
-                        spellName, quantity, rune.name(), runeItemId);
+                        spellName, quantity, rune.name(), rune.getItemId());
             });
         } catch (Exception e) {
             log.warn("Error getting spell rune requirements for transport '{}': {}",
@@ -492,71 +701,4 @@ public final class Rs2WalkerBankingPlanner {
         }
     }
 
-    /**
-     * Score bank->target distance in a way that reflects "bank then immediate teleport" behavior.
-     * For originless TELEPORTATION_ITEM / TELEPORTATION_SPELL edges, trim pre-teleport walking
-     * from the bank leg metric and keep the post-teleport tail.
-     */
-    private static int effectiveDistanceFromBank(List<WorldPoint> pathFromBankToTarget, int rawDistance) {
-        if (pathFromBankToTarget == null || pathFromBankToTarget.isEmpty() || rawDistance == Integer.MAX_VALUE) {
-            return rawDistance;
-        }
-
-        List<Transport> transports = Rs2Walker.getTransportsForPath(pathFromBankToTarget, 0, TransportType.TELEPORTATION_SPELL, true);
-        if (transports.isEmpty()) {
-            return rawDistance;
-        }
-
-        // Use first transport that the bank->target path actually consumes and model:
-        // walk_to_transport + transport_hop + post_transport_tail.
-        Transport firstTransport = transports.get(0);
-        int modeledDistance = transportModeledDistance(pathFromBankToTarget, firstTransport, rawDistance);
-        if (modeledDistance == Integer.MAX_VALUE) {
-            return rawDistance;
-        }
-        return Math.min(rawDistance, modeledDistance);
-    }
-
-    private static boolean isImmediateBankTeleport(Transport transport) {
-        if (transport == null || transport.getOrigin() != null) {
-            return false;
-        }
-        return transport.getType() == TransportType.TELEPORTATION_ITEM
-                || transport.getType() == TransportType.TELEPORTATION_SPELL;
-    }
-
-    private static int transportModeledDistance(List<WorldPoint> pathFromBankToTarget, Transport transport, int fallbackRawDistance) {
-        if (transport == null || pathFromBankToTarget == null || pathFromBankToTarget.isEmpty()) {
-            return fallbackRawDistance;
-        }
-
-        WorldPoint destination = transport.getDestination();
-        if (destination == null) {
-            return fallbackRawDistance;
-        }
-        int destinationIndex = pathFromBankToTarget.indexOf(destination);
-        if (destinationIndex < 0) {
-            return fallbackRawDistance;
-        }
-
-        int originIndex;
-        if (isImmediateBankTeleport(transport)) {
-            originIndex = 0;
-        } else {
-            WorldPoint origin = transport.getOrigin();
-            originIndex = origin == null ? 0 : pathFromBankToTarget.indexOf(origin);
-            if (originIndex < 0) {
-                originIndex = 0;
-            }
-        }
-
-        if (destinationIndex < originIndex) {
-            return fallbackRawDistance;
-        }
-
-        int walkToTransport = Math.max(0, originIndex);
-        int transportHop = 1;
-        int postTransportTail = Math.max(0, pathFromBankToTarget.size() - destinationIndex);
-        return walkToTransport + transportHop + postTransportTail;
-    }
 }

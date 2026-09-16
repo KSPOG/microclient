@@ -1,0 +1,256 @@
+package net.runelite.client.plugins.microbot.util.walker.transport;
+
+import net.runelite.api.Quest;
+import net.runelite.api.QuestState;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.client.plugins.microbot.shortestpath.Transport;
+import net.runelite.client.plugins.microbot.shortestpath.TransportType;
+import org.junit.Test;
+
+import java.util.Collections;
+import java.util.Map;
+import java.util.Set;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+public class OtherItemTeleportPolicyTest
+{
+	@Test
+	public void wholeAuditedProtocolBatchIsOwned()
+	{
+		Map<String, Integer> expected = Map.ofEntries(
+			Map.entry("Ardougne cloak", 2),
+			Map.entry("Book of the dead", 5),
+			Map.entry("Chronicle", 1),
+			Map.entry("Drakan's medallion", 3),
+			Map.entry("Enchanted lyre", 4),
+			Map.entry("Enchanted lyre(i)", 4),
+			Map.entry("Eternal teleport crystal", 2),
+			Map.entry("Icy basalt", 1),
+			Map.entry("Karamja gloves", 2),
+			Map.entry("Kharedst's memoirs", 5),
+			Map.entry("Morytania legs", 4),
+			Map.entry("Pharaoh's sceptre", 4),
+			Map.entry("Rada's blessing", 5),
+			Map.entry("Stony basalt", 2),
+			Map.entry("Teleport crystal", 2),
+			Map.entry("Varrock tablet", 1),
+			Map.entry("Watchtower tablet", 1));
+		int count = 0;
+		for (Map.Entry<String, Integer> family : expected.entrySet())
+		{
+			int rows = 0;
+			for (Set<Transport> group : Transport.loadAllFromResources().values())
+			{
+				for (Transport row : group)
+				{
+					if (row.getType() == TransportType.TELEPORTATION_ITEM
+						&& row.getDisplayInfo().startsWith(family.getKey() + ":"))
+					{
+						assertTrue(row.getDisplayInfo(), ItemTeleportPolicy.isEligible(row));
+						rows++;
+					}
+				}
+			}
+			assertEquals(family.getKey(), family.getValue().intValue(), rows);
+			count += rows;
+		}
+		assertEquals(48, count);
+	}
+
+	@Test
+	public void exactActionsDoNotDependOnSavedToggleOrInventoryEquipmentAliases()
+	{
+		assertEquals("Monastery Teleport", ItemTeleportPolicy.inventoryAction(row("Ardougne cloak: Monastery", 13121)));
+		assertEquals("Kandarin Monastery", ItemTeleportPolicy.equipmentAction(row("Ardougne cloak: Monastery", 13121)));
+		assertEquals("Ectofuntus Pit", ItemTeleportPolicy.equipmentAction(row("Morytania legs: Ecto Teleport", 13112)));
+		assertEquals("Burgh de Rott", ItemTeleportPolicy.equipmentAction(row("Morytania legs: Burgh Teleport", 13114)));
+		assertEquals("Jatiszo", ItemTeleportPolicy.inventoryAction(row("Enchanted lyre: Jatizso", 3691)));
+		assertEquals("Jatiszo", ItemTeleportPolicy.equipmentAction(row("Enchanted lyre(i): Jatizso", 23458)));
+		assertEquals("Grand Exchange", ItemTeleportPolicy.inventoryAction(row("Varrock tablet: Grand exchange", 8007)));
+		assertEquals("Yanille", ItemTeleportPolicy.inventoryAction(row("Watchtower tablet: Yanille", 8012)));
+		assertNull(ItemTeleportPolicy.equipmentAction(row("Teleport crystal: Lletya", 6099)));
+		assertNull(ItemTeleportPolicy.equipmentAction(row("Varrock tablet: Grand exchange", 8007)));
+	}
+
+	@Test
+	public void ardougneFarmUsesOnlyUnlimitedCapeVariants()
+	{
+		Transport farm = Transport.loadAllFromResources().values().stream()
+			.flatMap(Set::stream)
+			.filter(row -> "Ardougne cloak: Farm".equals(row.getDisplayInfo()))
+			.findFirst().orElseThrow(AssertionError::new);
+		assertEquals(new WorldPoint(2664, 3374, 0), farm.getDestination());
+		assertEquals(Set.of(Set.of(13124), Set.of(20760)), farm.getItemIdRequirements());
+		assertFalse(farm.isConsumable());
+		assertTrue(ItemTeleportPolicy.isEligible(farm));
+		assertEquals("Farm Teleport", ItemTeleportPolicy.inventoryAction(farm));
+		assertEquals("Ardougne Farm", ItemTeleportPolicy.equipmentAction(farm));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Ardougne cloak: Farm", 13122)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Ardougne cloak: Farm", 13123)));
+	}
+
+	@Test
+	public void basaltUsesDirectedDestinationAndRetainsQuestAndRoofRequirements()
+	{
+		int rows = 0;
+		for (Set<Transport> group : Transport.loadAllFromResources().values())
+		{
+			for (Transport row : group)
+			{
+				if (row.getType() != TransportType.TELEPORTATION_ITEM || !row.getDisplayInfo().contains("basalt:"))
+				{
+					continue;
+				}
+				assertEquals(QuestState.FINISHED, row.getQuests().get(Quest.MAKING_FRIENDS_WITH_MY_ARM));
+				assertNull(ItemTeleportPolicy.equipmentAction(row));
+				if (row.getDestination().equals(new WorldPoint(2837, 3695, 0)))
+				{
+					assertEquals("Troll Stronghold roof", ItemTeleportPolicy.inventoryAction(row));
+					assertFalse(row.getVarbits().isEmpty());
+				}
+				else if (row.getDestination().equals(new WorldPoint(2845, 3694, 0)))
+				{
+					assertEquals("Troll Stronghold entrance", ItemTeleportPolicy.inventoryAction(row));
+				}
+				else
+				{
+					assertEquals("Weiss", ItemTeleportPolicy.inventoryAction(row));
+				}
+				rows++;
+			}
+		}
+		assertEquals(3, rows);
+		assertFalse(ItemTeleportPolicy.isEligible(row("Stony basalt: Troll Stronghold", 22601)));
+	}
+
+	@Test
+	public void unownedChargeUnlockMapAndInvalidIdProtocolsStayDeferred()
+	{
+		assertFalse(ItemTeleportPolicy.isEligible(row("Ardougne cloak: Farm", 13122)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Chronicle: Teleport", 13660)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Drakan's medallion: Slepe", 22400)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Pharaoh's sceptre: Jaltevas", 26948)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Quetzal whistle: Hunter Guild", 29271)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Calcified moth: Crush", 29092)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Mokhaiotl waystone: Channel", 31101)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Teleport crystal: Lletya", 6103)));
+		assertFalse(ItemTeleportPolicy.isEligible(row("Enchanted lyre: Rellekka", 3690)));
+	}
+
+	@Test
+	public void quetzalWhistlesUseExactMapModeAndDestinationContracts()
+	{
+		int rows = 0;
+		for (Set<Transport> group : Transport.loadAllFromResources().values())
+		{
+			for (Transport row : group)
+			{
+				if (!ItemTeleportPolicy.isQuetzalWhistle(row))
+				{
+					continue;
+				}
+				rows++;
+				assertTrue(ItemTeleportPolicy.isEligible(row));
+				assertEquals("Signal", ItemTeleportPolicy.inventoryAction(row));
+				assertNull(ItemTeleportPolicy.equipmentAction(row));
+				assertTrue(row.getVarbits().stream().anyMatch(gate ->
+					gate.getVarbitId() == 19681 && gate.getValue() == 0));
+			}
+		}
+		assertEquals(14, rows);
+	}
+
+	@Test
+	public void calcifiedMothAndSlepeUseExactAuditedContracts()
+	{
+		Transport moth = find("Calcified moth: Crush");
+		assertEquals(new WorldPoint(1439, 9564, 0), moth.getDestination());
+		assertTrue(moth.isConsumable());
+		assertEquals(Map.of(Quest.PERILOUS_MOONS, QuestState.FINISHED), moth.getQuests());
+		assertTrue(ItemTeleportPolicy.isEligible(moth));
+		assertEquals("Crush", ItemTeleportPolicy.inventoryAction(moth));
+		assertNull(ItemTeleportPolicy.equipmentAction(moth));
+
+		Transport slepe = find("Drakan's medallion: Slepe");
+		assertEquals(new WorldPoint(3808, 9700, 0), slepe.getDestination());
+		assertFalse(slepe.isConsumable());
+		assertEquals(1, slepe.getVarbits().size());
+		assertEquals(12416, slepe.getVarbits().iterator().next().getVarbitId());
+		assertTrue(ItemTeleportPolicy.isEligible(slepe));
+		assertEquals("Slepe", ItemTeleportPolicy.inventoryAction(slepe));
+		assertEquals("Slepe", ItemTeleportPolicy.equipmentAction(slepe));
+	}
+
+	@Test
+	public void chronicleUsesOneChargedReusableContainerOutsideWilderness()
+	{
+		Transport chronicle = find("Chronicle: Teleport");
+		assertEquals(new WorldPoint(3200, 3355, 0), chronicle.getDestination());
+		assertFalse(chronicle.isMembers());
+		assertTrue(chronicle.isConsumable());
+		assertEquals(0, chronicle.getMaxWildernessLevel());
+		assertEquals(Set.of(Set.of(13660)), chronicle.getItemIdRequirements());
+		assertTrue(ItemTeleportPolicy.isEligible(chronicle));
+		assertEquals("Teleport", ItemTeleportPolicy.inventoryAction(chronicle));
+		assertEquals("Teleport", ItemTeleportPolicy.equipmentAction(chronicle));
+	}
+
+	@Test
+	public void jaltevasUsesBothChargedSceptresAndExactNecropolisUnlock()
+	{
+		Transport jaltevas = find("Pharaoh's sceptre: Jaltevas");
+		assertEquals(new WorldPoint(3313, 2718, 0), jaltevas.getDestination());
+		assertEquals(Set.of(Set.of(26948), Set.of(26950)), jaltevas.getItemIdRequirements());
+		assertEquals(1, jaltevas.getVarbits().size());
+		assertEquals(13839, jaltevas.getVarbits().iterator().next().getVarbitId());
+		assertTrue(ItemTeleportPolicy.isEligible(jaltevas));
+		assertEquals("Jaltevas", ItemTeleportPolicy.inventoryAction(jaltevas));
+		assertEquals("Jaltevas", ItemTeleportPolicy.equipmentAction(jaltevas));
+	}
+
+	@Test
+	public void mokhaiotlWaystoneUsesOnlyItsUsableQuestGatedConsumableVariant()
+	{
+		int rows = 0;
+		for (Set<Transport> group : Transport.loadAllFromResources().values())
+		{
+			for (Transport row : group)
+			{
+				if (!"Mokhaiotl waystone: Channel".equals(row.getDisplayInfo()))
+				{
+					continue;
+				}
+				rows++;
+				assertEquals(new WorldPoint(1311, 9497, 0), row.getDestination());
+				assertEquals(Set.of(Set.of(31099)), row.getItemIdRequirements());
+				assertEquals(Map.of(Quest.THE_FINAL_DAWN, QuestState.FINISHED), row.getQuests());
+				assertTrue(row.isMembers());
+				assertTrue(row.isConsumable());
+				assertEquals(29, row.getMaxWildernessLevel());
+				assertEquals(4, row.getDuration());
+				assertTrue(ItemTeleportPolicy.isEligible(row));
+				assertEquals("Channel", ItemTeleportPolicy.inventoryAction(row));
+				assertNull(ItemTeleportPolicy.equipmentAction(row));
+			}
+		}
+		assertEquals(1, rows);
+	}
+
+	private static Transport row(String display, int id)
+	{
+		return new Transport(new WorldPoint(3000, 3000, 0), display, TransportType.TELEPORTATION_ITEM,
+			true, 20, Collections.singleton(Collections.singleton(id)));
+	}
+
+	private static Transport find(String display)
+	{
+		return Transport.loadAllFromResources().values().stream()
+			.flatMap(Set::stream)
+			.filter(row -> display.equals(row.getDisplayInfo()))
+			.findFirst().orElseThrow(AssertionError::new);
+	}
+}

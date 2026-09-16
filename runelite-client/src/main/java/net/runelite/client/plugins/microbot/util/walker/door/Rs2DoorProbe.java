@@ -16,6 +16,7 @@ import net.runelite.client.plugins.microbot.shortestpath.TransportType;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
+import net.runelite.client.plugins.microbot.util.walker.obstacle.Rs2SceneLocation;
 
 /**
  * Door-probe logic that operates against a {@link DoorProbeContext} (the scan-scoped caches) and
@@ -47,14 +48,14 @@ public final class Rs2DoorProbe {
 
     /**
      * True when this scene object is the interactable listed on a transport catalog row (same
-     * coordinates and object ids as TSV loaded into {@link Rs2PathApi#getTransports()}), and is not
-     * itself door-like. Used to avoid treating a catalog transport as a plain door.
+     * coordinates and object ids as TSV loaded into {@link Rs2PathApi#getTransports()}). Catalog
+     * ownership wins even when its display name and action look like an ordinary door.
      */
     public static boolean isCatalogTransportObject(TileObject object) {
         if (object == null) {
             return false;
         }
-        WorldPoint loc = object.getWorldLocation();
+        WorldPoint loc = Rs2SceneLocation.templateLocation(object);
         if (loc == null) {
             return false;
         }
@@ -74,7 +75,7 @@ public final class Rs2DoorProbe {
                     continue;
                 }
                 for (Transport t : transports) {
-                    if (t != null && t.getObjectId() == id && !isDoorLikeCatalogTransport(t)) {
+                    if (t != null && t.getObjectId() == id) {
                         return true;
                     }
                 }

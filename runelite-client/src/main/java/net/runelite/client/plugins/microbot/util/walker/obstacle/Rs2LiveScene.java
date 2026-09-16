@@ -1,8 +1,10 @@
 package net.runelite.client.plugins.microbot.util.walker.obstacle;
 
 import net.runelite.api.TileObject;
+import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
+import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
 
@@ -28,6 +30,12 @@ public final class Rs2LiveScene implements LiveScene {
         this.reachable = reachable;
     }
 
+	/** Reads instance state on the client thread without adding lambdas to the legacy walker. */
+	public static boolean isInInstance() {
+		return Microbot.getClientThread().runOnClientThreadOptional(() ->
+				Microbot.getClient().getTopLevelWorldView().isInstance()).orElse(false);
+	}
+
     @Override
     public WorldPoint playerLocation() {
         return player;
@@ -50,6 +58,40 @@ public final class Rs2LiveScene implements LiveScene {
 
     @Override
     public TileObject objectAt(WorldPoint tile) {
-        return tile == null ? null : Rs2GameObject.getGameObject(tile);
+		return exactGameObjectAt(tile);
     }
+
+	/** Unlike {@code getGameObject(tile)}, this requires the object's anchor to be exactly on tile. */
+	public static TileObject exactGameObjectAt(WorldPoint tile) {
+		if (tile == null) {
+			return null;
+		}
+		return Microbot.getClientThread().runOnClientThreadOptional(() ->
+				Rs2SceneLocation.sceneLocations(tile).stream()
+						.map(Rs2GameObject::findGameObjectByLocation)
+						.filter(java.util.Objects::nonNull)
+						.findFirst().orElse(null))
+				.orElse(null);
+	}
+
+	/** Returns an exact-anchor MLM rockfall, never a nearby object selected by radius search. */
+	public static TileObject exactMineableAt(WorldPoint tile) {
+		if (tile == null) {
+			return null;
+		}
+		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			for (WorldPoint sceneTile : Rs2SceneLocation.sceneLocations(tile)) {
+				TileObject object = Rs2GameObject.findGameObjectByLocation(sceneTile);
+				if (object == null) {
+					continue;
+				}
+				int objectId = object.getId();
+				if (objectId == ObjectID.MOTHERLODE_ROCKFALL_1
+					|| objectId == ObjectID.MOTHERLODE_ROCKFALL_2) {
+					return object;
+				}
+			}
+			return null;
+		}).orElse(null);
+	}
 }

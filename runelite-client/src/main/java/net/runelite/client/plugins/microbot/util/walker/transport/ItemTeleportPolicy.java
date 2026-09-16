@@ -1,0 +1,841 @@
+package net.runelite.client.plugins.microbot.util.walker.transport;
+
+import net.runelite.client.plugins.microbot.util.leaguetransport.Rs2MapOfAlacrityTransport;
+
+import net.runelite.api.Quest;
+import net.runelite.api.QuestState;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.gameval.InterfaceID;
+import net.runelite.client.plugins.microbot.shortestpath.Transport;
+import net.runelite.client.plugins.microbot.shortestpath.TransportType;
+import net.runelite.client.plugins.microbot.shortestpath.TransportVarbit;
+
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/** Exact audited inventory/submenu contracts; no generic activation or dialogue fallback. */
+public final class ItemTeleportPolicy
+{
+	private static final Map<String, Set<Integer>> ITEMS = Map.ofEntries(
+		Map.entry("Burning amulet", Set.of(21166, 21169, 21171, 21173, 21175)),
+		Map.entry("Camulet", Set.of(6707)),
+		Map.entry("Master Scroll Book", Set.of(21389)),
+		Map.entry("Mokhaiotl waystone", Set.of(31099)),
+		Map.entry("Mythical cape", Set.of(22114, 24855)),
+		Map.entry("Ardougne cloak", Set.of(13121, 13122, 13123, 13124, 20760)),
+		Map.entry("Book of the dead", Set.of(25818)),
+		Map.entry("Calcified moth", Set.of(29090)),
+		Map.entry("Chronicle", Set.of(13660)),
+		Map.entry("Drakan's medallion", Set.of(22400)),
+		Map.entry("Enchanted lyre", Set.of(3691, 6125, 6126, 6127, 13079)),
+		Map.entry("Enchanted lyre(i)", Set.of(23458)),
+		Map.entry("Eternal teleport crystal", Set.of(23946)),
+		Map.entry("Icy basalt", Set.of(22599)),
+		Map.entry("Karamja gloves", Set.of(11140, 13103)),
+		Map.entry("Kharedst's memoirs", Set.of(21760)),
+		Map.entry("Morytania legs", Set.of(13112, 13113, 13114, 13115)),
+		Map.entry("Pharaoh's sceptre", Set.of(26948, 26950)),
+		Map.entry("Quetzal whistle", Set.of(29271, 29273, 29275)),
+		Map.entry("Rada's blessing", Set.of(22941, 22943, 22945, 22947)),
+		Map.entry("Stony basalt", Set.of(22601)),
+		Map.entry("Teleport to House tablet", Set.of(8013)),
+		Map.entry("Teleport crystal", Set.of(6099, 6100, 6101, 6102, 13102)),
+		Map.entry("Varrock tablet", Set.of(8007)),
+		Map.entry("Watchtower tablet", Set.of(8012)),
+		Map.entry("Achievement diary cape", Set.of(13069, 19476)),
+		Map.entry("Amulet of glory", Set.of(1706, 1708, 1710, 1712, 10354, 10356, 10358, 10360, 11964, 11966, 11976, 11978, 19707)),
+		Map.entry("Amulet of the eye", Set.of(26914)),
+		Map.entry("Combat bracelet", Set.of(11118, 11120, 11122, 11124, 11972, 11974)),
+		Map.entry("Construction cape", Set.of(9789, 9790)),
+		Map.entry("Crafting cape", Set.of(9780, 9781)),
+		Map.entry("Desert amulet", Set.of(13134, 13135, 13136)),
+		Map.entry("Digsite pendant", Set.of(11190, 11191, 11192, 11193, 11194)),
+		Map.entry("Explorer's ring", Set.of(13126, 13127, 13128)),
+		Map.entry("Farming cape", Set.of(9810, 9811)),
+		Map.entry("Fishing cape", Set.of(9798, 9799)),
+		Map.entry("Games necklace", Set.of(3853, 3855, 3857, 3859, 3861, 3863, 3865, 3867)),
+		Map.entry("Giantsoul Amulet", Set.of(30638)),
+		Map.entry("Hunter cape", Set.of(9948, 9949)),
+		Map.entry("Music cape", Set.of(13221, 13222)),
+		Map.entry("Max cape", Set.of(13280, 13342)),
+		Map.entry("Necklace of passage", Set.of(21146, 21149, 21151, 21153, 21155)),
+		Map.entry("Pendant of ates", Set.of(29893)),
+		Map.entry("Quest point cape", Set.of(9813, 13068)),
+		Map.entry("Ring of dueling", Set.of(2552, 2554, 2556, 2558, 2560, 2562, 2564, 2566)),
+		Map.entry("Ring of shadows", Set.of(28327)),
+		Map.entry("Ring of the elements", Set.of(26818)),
+		Map.entry("Ring of wealth", Set.of(11980, 11982, 11984, 11986, 11988, 20786, 20787, 20788, 20789, 20790)),
+		Map.entry("Sailors' amulet", Set.of(32399)),
+		Map.entry("Skills necklace", Set.of(11105, 11107, 11109, 11111, 11968, 11970)),
+		Map.entry("Slayer ring", Set.of(11866, 11867, 11868, 11869, 11870, 11871, 11872, 11873, 21268)),
+		Map.entry("Strength cape", Set.of(9750, 9751)),
+		Map.entry("Xeric's talisman", Set.of(13393)));
+	private static final Map<String, String> ACTIONS = Map.ofEntries(
+		Map.entry("Burning amulet: Chaos Temple", "Chaos Temple"),
+		Map.entry("Burning amulet: Bandit Camp", "Bandit Camp"),
+		Map.entry("Burning amulet: Lava Maze", "Lava Maze"),
+		Map.entry("Camulet: Enakhra's Temple", "Enakhra's Temple"),
+		Map.entry("Camulet: Enakhra's Temple Entrance", "Enakhra's Temple Entrance"),
+		Map.entry("Mokhaiotl waystone: Channel", "Channel"),
+		Map.entry("Mythical cape: Teleport", "Teleport"),
+		Map.entry("Ardougne cloak: Monastery", "Monastery Teleport"),
+		Map.entry("Ardougne cloak: Farm", "Farm Teleport"),
+		Map.entry("Book of the dead: A Dark Disposition", "A Dark Disposition"),
+		Map.entry("Book of the dead: History and Hearsay", "History and Hearsay"),
+		Map.entry("Book of the dead: Jewellery of Jubilation", "Jewellery of Jubilation"),
+		Map.entry("Book of the dead: Lunch by the Lancalliums", "Lunch by the Lancalliums"),
+		Map.entry("Book of the dead: The Fisher's Flute", "The Fisher's Flute"),
+		Map.entry("Calcified moth: Crush", "Crush"),
+		Map.entry("Chronicle: Teleport", "Teleport"),
+		Map.entry("Drakan's medallion: Darkmeyer", "Darkmeyer"),
+		Map.entry("Drakan's medallion: Slepe", "Slepe"),
+		Map.entry("Drakan's medallion: Ver Sinhaza", "Ver Sinhaza"),
+		Map.entry("Enchanted lyre: Jatizso", "Jatiszo"),
+		Map.entry("Enchanted lyre: Neitiznot", "Neitiznot"),
+		Map.entry("Enchanted lyre: Rellekka", "Rellekka"),
+		Map.entry("Enchanted lyre: Waterbirth Island", "Waterbirth Island"),
+		Map.entry("Enchanted lyre(i): Jatizso", "Jatiszo"),
+		Map.entry("Enchanted lyre(i): Neitiznot", "Neitiznot"),
+		Map.entry("Enchanted lyre(i): Rellekka", "Rellekka"),
+		Map.entry("Enchanted lyre(i): Waterbirth Island", "Waterbirth Island"),
+		Map.entry("Eternal teleport crystal: Lletya", "Lletya"),
+		Map.entry("Eternal teleport crystal: Prifddinas", "Prifddinas"),
+		Map.entry("Icy basalt: Weiss", "Weiss"),
+		Map.entry("Karamja gloves: Gem Mine", "Gem Mine"),
+		Map.entry("Karamja gloves: Slayer Master", "Slayer Master"),
+		Map.entry("Kharedst's memoirs: A Dark Disposition", "A Dark Disposition"),
+		Map.entry("Kharedst's memoirs: History and Hearsay", "History and Hearsay"),
+		Map.entry("Kharedst's memoirs: Jewellery of Jubilation", "Jewellery of Jubilation"),
+		Map.entry("Kharedst's memoirs: Lunch by the Lancalliums", "Lunch by the Lancalliums"),
+		Map.entry("Kharedst's memoirs: The Fisher's Flute", "The Fisher's Flute"),
+		Map.entry("Morytania legs: Burgh Teleport", "Burgh Teleport"),
+		Map.entry("Morytania legs: Ecto Teleport", "Ecto Teleport"),
+		Map.entry("Max cape: Home", "Home"),
+		Map.entry("Max cape: Rimmington", "Rimmington"),
+		Map.entry("Max cape: Taverley", "Taverley"),
+		Map.entry("Max cape: Pollnivneach", "Pollnivneach"),
+		Map.entry("Max cape: Hosidius", "Hosidius"),
+		Map.entry("Max cape: Rellekka", "Rellekka"),
+		Map.entry("Max cape: Brimhaven", "Brimhaven"),
+		Map.entry("Max cape: Yanille", "Yanille"),
+		Map.entry("Max cape: Prifddinas", "Prifddinas"),
+		Map.entry("Max cape: Warriors' Guild", "Warrior's Guild"),
+		Map.entry("Max cape: Fishing Guild", "Fishing Guild"),
+		Map.entry("Max cape: Crafting Guild", "Crafting Guild"),
+		Map.entry("Max cape: Feldip Hills", "Feldip Hills"),
+		Map.entry("Max cape: Black chinchompa", "Black chinchompas"),
+		Map.entry("Pharaoh's sceptre: Jaldraocht", "Jaldraocht"),
+		Map.entry("Pharaoh's sceptre: Jaleustrophos", "Jaleustrophos"),
+		Map.entry("Pharaoh's sceptre: Jalsavrah", "Jalsavrah"),
+		Map.entry("Pharaoh's sceptre: Jaltevas", "Jaltevas"),
+		Map.entry("Quetzal whistle: Aldarin", "Signal"),
+		Map.entry("Quetzal whistle: Civitas illa Fortis", "Signal"),
+		Map.entry("Quetzal whistle: Hunter Guild", "Signal"),
+		Map.entry("Quetzal whistle: Quetzacalli Gorge", "Signal"),
+		Map.entry("Quetzal whistle: Sunset Coast", "Signal"),
+		Map.entry("Quetzal whistle: The Teomat", "Signal"),
+		Map.entry("Quetzal whistle: Fortis Colosseum", "Signal"),
+		Map.entry("Quetzal whistle: Outer Fortis", "Signal"),
+		Map.entry("Quetzal whistle: Colossal Wyrm Remains", "Signal"),
+		Map.entry("Quetzal whistle: Cam Torum Entrance", "Signal"),
+		Map.entry("Quetzal whistle: Salvager Overlook", "Signal"),
+		Map.entry("Quetzal whistle: Tal Teklan", "Signal"),
+		Map.entry("Quetzal whistle: Kastori", "Signal"),
+		Map.entry("Quetzal whistle: Auburnvale", "Signal"),
+		Map.entry("Rada's blessing: Kourend Woodland", "Kourend Woodland"),
+		Map.entry("Rada's blessing: Mount Karuulm", "Mount Karuulm"),
+		Map.entry("Stony basalt: Troll Stronghold", "Troll Stronghold"),
+		Map.entry("Teleport to House tablet: Outside", "Outside"),
+		Map.entry("Teleport to House tablet: Inside", "Inside"),
+		Map.entry("Teleport crystal: Lletya", "Lletya"),
+		Map.entry("Teleport crystal: Prifddinas", "Prifddinas"),
+		Map.entry("Varrock tablet: Grand exchange", "Grand Exchange"),
+		Map.entry("Watchtower tablet: Yanille", "Yanille"),
+		Map.entry("Achievement diary cape: Elder Gnome child", "Western Provinces"),
+		Map.entry("Achievement diary cape: Elise", "Kourend & Kebos"),
+		Map.entry("Achievement diary cape: Flax keeper", "Kandarin"),
+		Map.entry("Achievement diary cape: Hatius Cosaintus", "Lumbridge & Draynor"),
+		Map.entry("Achievement diary cape: Jarr", "Desert"),
+		Map.entry("Achievement diary cape: Le-sabrè", "Morytania"),
+		Map.entry("Achievement diary cape: Lesser Fanatic", "Wilderness"),
+		Map.entry("Achievement diary cape: Pirate Jackie the Fruit", "Karamja"),
+		Map.entry("Achievement diary cape: Sir Rebral", "Falador"),
+		Map.entry("Achievement diary cape: Thorodin", "Fremennik"),
+		Map.entry("Achievement diary cape: Toby", "Varrock"),
+		Map.entry("Achievement diary cape: Twiggy O'Korn", "Twiggy O'Korn"),
+		Map.entry("Achievement diary cape: Two-pints", "Ardougne"),
+		Map.entry("Amulet of glory: Al Kharid", "Al Kharid"),
+		Map.entry("Amulet of glory: Draynor Village", "Draynor Village"),
+		Map.entry("Amulet of glory: Edgeville", "Edgeville"),
+		Map.entry("Amulet of glory: Karamja", "Karamja"),
+		Map.entry("Amulet of the eye: Teleport", "Teleport"),
+		Map.entry("Combat bracelet: Champions' Guild", "Champions' Guild"),
+		Map.entry("Combat bracelet: Monastery", "Monastery"),
+		Map.entry("Combat bracelet: Ranging Guild", "Ranging Guild"),
+		Map.entry("Combat bracelet: Warriors' Guild", "Warriors' Guild"),
+		Map.entry("Construction cape: Aldarin", "Aldarin"),
+		Map.entry("Construction cape: Tele to POH", "Tele to POH"),
+		Map.entry("Construction cape: Brimhaven", "Brimhaven"),
+		Map.entry("Construction cape: Hosidius", "Hosidius"),
+		Map.entry("Construction cape: Pollnivneach", "Pollnivneach"),
+		Map.entry("Construction cape: Prifddinas", "Prifddinas"),
+		Map.entry("Construction cape: Rellekka", "Rellekka"),
+		Map.entry("Construction cape: Rimmington", "Rimmington"),
+		Map.entry("Construction cape: Taverley", "Taverley"),
+		Map.entry("Construction cape: Yanille", "Yanille"),
+		Map.entry("Crafting cape: Teleport", "Teleport"),
+		Map.entry("Desert amulet: Kalphite Cave", "Kalphite Cave"),
+		Map.entry("Desert amulet: Nardah", "Nardah"),
+		Map.entry("Desert amulet: Teleport", "Teleport"),
+		Map.entry("Digsite pendant: Digsite", "Digsite"),
+		Map.entry("Digsite pendant: Fossil Island", "Fossil Island"),
+		Map.entry("Digsite pendant: Lithkren", "Lithkren Dungeon"),
+		Map.entry("Explorer's ring: Teleport", "Teleport"),
+		Map.entry("Farming cape: Teleport", "Teleport"),
+		Map.entry("Fishing cape: Fishing Guild", "Fishing Guild"),
+		Map.entry("Fishing cape: Otto's Grotto", "Otto's Grotto"),
+		Map.entry("Games necklace: Barbarian Outpost", "Barbarian Outpost"),
+		Map.entry("Games necklace: Burthorpe", "Burthorpe"),
+		Map.entry("Games necklace: Corporeal Beast", "Corporeal Beast"),
+		Map.entry("Games necklace: Tears of Guthix", "Tears of Guthix"),
+		Map.entry("Games necklace: Wintertodt Camp", "Wintertodt Camp"),
+		Map.entry("Giantsoul Amulet: Branda and Eldric", "Branda and Eldric"),
+		Map.entry("Giantsoul Amulet: Bryophyta", "Bryophyta"),
+		Map.entry("Giantsoul Amulet: Obor", "Obor"),
+		Map.entry("Hunter cape: Feldip Hills", "Carnivorous Chinchompas"),
+		Map.entry("Hunter cape: Black chinchompa", "Black Chinchompas"),
+		Map.entry("Music cape: Teleport", "Teleport"),
+		Map.entry("Necklace of passage: Eagles' Eyrie", "Eagles' Eyrie"),
+		Map.entry("Necklace of passage: The Outpost", "The Outpost"),
+		Map.entry("Necklace of passage: Wizards' Tower", "Wizards' Tower"),
+		Map.entry("Pendant of ates: Darkfrost", "Darkfrost"),
+		Map.entry("Pendant of ates: Kastori", "Kastori"),
+		Map.entry("Pendant of ates: Nemus Retreat", "Nemus Retreat"),
+		Map.entry("Pendant of ates: North Aldarin", "North Aldarin"),
+		Map.entry("Pendant of ates: Ralos' Rise", "Ralos' Rise"),
+		Map.entry("Pendant of ates: Twilight Temple", "Twilight Temple"),
+		Map.entry("Quest point cape: Teleport", "Teleport"),
+		Map.entry("Ring of dueling: Castle Wars", "Castle Wars"),
+		Map.entry("Ring of dueling: Emir's Arena", "Emir's Arena"),
+		Map.entry("Ring of dueling: Ferox Enclave", "Ferox Enclave"),
+		Map.entry("Ring of shadows: Ancient Vault", "The Ancient Vault"),
+		Map.entry("Ring of shadows: Ghorrock Dungeon", "Ghorrock Dungeon"),
+		Map.entry("Ring of shadows: Lassar Undercity", "Lassar Undercity"),
+		Map.entry("Ring of shadows: The Scar", "The Scar"),
+		Map.entry("Ring of shadows: The Stranglewood", "The Stranglewood"),
+		Map.entry("Ring of the elements: Air Altar", "Air Altar"),
+		Map.entry("Ring of the elements: Earth Altar", "Earth Altar"),
+		Map.entry("Ring of the elements: Fire Altar", "Fire Altar"),
+		Map.entry("Ring of the elements: Water Altar", "Water Altar"),
+		Map.entry("Ring of wealth: Dondakan", "Dondakan"),
+		Map.entry("Ring of wealth: Falador", "Falador"),
+		Map.entry("Ring of wealth: Grand Exchange", "Grand Exchange"),
+		Map.entry("Ring of wealth: Miscellania", "Miscellania"),
+		Map.entry("Sailors' amulet: Deepfin Point", "Deepfin Point"),
+		Map.entry("Sailors' amulet: Port Roberts", "Port Roberts"),
+		Map.entry("Sailors' amulet: The Pandemonium", "The Pandemonium"),
+		Map.entry("Skills necklace: Cooking Guild", "Cooking Guild"),
+		Map.entry("Skills necklace: Crafting Guild", "Crafting Guild"),
+		Map.entry("Skills necklace: Farming Guild", "Farming Guild"),
+		Map.entry("Skills necklace: Fishing Guild", "Fishing Guild"),
+		Map.entry("Skills necklace: Mining Guild", "Mining Guild"),
+		Map.entry("Skills necklace: Woodcutting Guild", "Woodcutting Guild"),
+		Map.entry("Slayer ring: Dark Beasts", "Dark Beasts"),
+		Map.entry("Slayer ring: Fremennik", "Fremennik Dungeon"),
+		Map.entry("Slayer ring: Slayer Tower", "Slayer Tower"),
+		Map.entry("Slayer ring: Stronghold Slayer Cave", "Stronghold"),
+		Map.entry("Slayer ring: Tarn's Lair", "Tarn's Lair"),
+		Map.entry("Strength cape: Warriors' Guild", "Teleport"),
+		Map.entry("Xeric's talisman: Xeric's Glade", "Xeric's Glade"),
+		Map.entry("Xeric's talisman: Xeric's Heart", "Xeric's Heart"),
+		Map.entry("Xeric's talisman: Xeric's Inferno", "Xeric's Inferno"),
+		Map.entry("Xeric's talisman: Xeric's Lookout", "Xeric's Lookout"));
+	private static final Map<String, Integer> MASTER_SCROLL_BOOK_WIDGETS = Map.ofEntries(
+		Map.entry("Master Scroll Book: Nardah", InterfaceID.Bookofscrolls.TELEPORTSCROLL_NARDAH),
+		Map.entry("Master Scroll Book: Digsite", InterfaceID.Bookofscrolls.TELEPORTSCROLL_DIGSITE),
+		Map.entry("Master Scroll Book: Feldip hills", InterfaceID.Bookofscrolls.TELEPORTSCROLL_FELDIP),
+		Map.entry("Master Scroll Book: Lunar isle", InterfaceID.Bookofscrolls.TELEPORTSCROLL_LUNARISLE),
+		Map.entry("Master Scroll Book: Mort'ton", InterfaceID.Bookofscrolls.TELEPORTSCROLL_MORTTON),
+		Map.entry("Master Scroll Book: Pest control", InterfaceID.Bookofscrolls.TELEPORTSCROLL_PESTCONTROL),
+		Map.entry("Master Scroll Book: Piscatoris", InterfaceID.Bookofscrolls.TELEPORTSCROLL_PISCATORIS),
+		Map.entry("Master Scroll Book: Tai bwo wannai", InterfaceID.Bookofscrolls.TELEPORTSCROLL_TAIBWO),
+		Map.entry("Master Scroll Book: Iorwerth camp", InterfaceID.Bookofscrolls.TELEPORTSCROLL_ELF),
+		Map.entry("Master Scroll Book: Mos le'harmless", InterfaceID.Bookofscrolls.TELEPORTSCROLL_MOSLES),
+		Map.entry("Master Scroll Book: Lumberyard", InterfaceID.Bookofscrolls.TELEPORTSCROLL_LUMBERYARD),
+		Map.entry("Master Scroll Book: Zul-andra", InterfaceID.Bookofscrolls.TELEPORTSCROLL_ZULANDRA),
+		Map.entry("Master Scroll Book: Key master", InterfaceID.Bookofscrolls.TELEPORTSCROLL_CERBERUS),
+		Map.entry("Master Scroll Book: Revenant cave", InterfaceID.Bookofscrolls.TELEPORTSCROLL_REVENANTS),
+		Map.entry("Master Scroll Book: Watson", InterfaceID.Bookofscrolls.TELEPORTSCROLL_WATSON),
+		Map.entry("Master Scroll Book: Spider cave", InterfaceID.Bookofscrolls.TELEPORTSCROLL_SPIDERCAVE),
+		Map.entry("Master Scroll Book: Colossal wyrm", InterfaceID.Bookofscrolls.TELEPORTSCROLL_COLOSSAL_WYRM),
+		Map.entry("Master Scroll Book: Chasm of fire", InterfaceID.Bookofscrolls.TELEPORTSCROLL_CHASMOFFIRE));
+	private static final Map<Integer, WorldPoint> HOUSE_EXTERIORS = Map.of(
+		1, new WorldPoint(2952, 3224, 0),
+		2, new WorldPoint(2892, 3465, 0),
+		3, new WorldPoint(3339, 3001, 0),
+		4, new WorldPoint(2669, 3629, 0),
+		5, new WorldPoint(2756, 3176, 0),
+		6, new WorldPoint(2545, 3097, 0),
+		7, new WorldPoint(3239, 6077, 0),
+		8, new WorldPoint(1740, 3517, 0));
+	private static final Map<String, WorldPoint> MAX_CAPE_DESTINATIONS = Map.ofEntries(
+		Map.entry("Max cape: Rimmington", new WorldPoint(2952, 3224, 0)),
+		Map.entry("Max cape: Taverley", new WorldPoint(2892, 3465, 0)),
+		Map.entry("Max cape: Pollnivneach", new WorldPoint(3339, 3001, 0)),
+		Map.entry("Max cape: Hosidius", new WorldPoint(1743, 3517, 0)),
+		Map.entry("Max cape: Rellekka", new WorldPoint(2669, 3629, 0)),
+		Map.entry("Max cape: Brimhaven", new WorldPoint(2756, 3176, 0)),
+		Map.entry("Max cape: Yanille", new WorldPoint(2545, 3097, 0)),
+		Map.entry("Max cape: Prifddinas", new WorldPoint(3239, 6077, 0)),
+		Map.entry("Max cape: Warriors' Guild", new WorldPoint(2865, 3546, 0)),
+		Map.entry("Max cape: Fishing Guild", new WorldPoint(2604, 3401, 0)),
+		Map.entry("Max cape: Crafting Guild", new WorldPoint(2931, 3286, 0)),
+		Map.entry("Max cape: Feldip Hills", new WorldPoint(2556, 2917, 0)),
+		Map.entry("Max cape: Black chinchompa", new WorldPoint(3144, 3772, 0)));
+	private static final Map<String, WorldPoint> BURNING_AMULET_DESTINATIONS = Map.of(
+		"Burning amulet: Chaos Temple", new WorldPoint(3234, 3634, 0),
+		"Burning amulet: Bandit Camp", new WorldPoint(3038, 3651, 0),
+		"Burning amulet: Lava Maze", new WorldPoint(3028, 3842, 0));
+	private static final Map<String, WorldPoint> QUETZAL_WHISTLE_DESTINATIONS = Map.ofEntries(
+		Map.entry("Aldarin", new WorldPoint(1389, 2901, 0)),
+		Map.entry("Civitas illa Fortis", new WorldPoint(1697, 3140, 0)),
+		Map.entry("Hunter Guild", new WorldPoint(1585, 3053, 0)),
+		Map.entry("Quetzacalli Gorge", new WorldPoint(1510, 3221, 0)),
+		Map.entry("Sunset Coast", new WorldPoint(1548, 2995, 0)),
+		Map.entry("The Teomat", new WorldPoint(1437, 3171, 0)),
+		Map.entry("Fortis Colosseum", new WorldPoint(1779, 3111, 0)),
+		Map.entry("Outer Fortis", new WorldPoint(1700, 3037, 0)),
+		Map.entry("Colossal Wyrm Remains", new WorldPoint(1670, 2933, 0)),
+		Map.entry("Cam Torum Entrance", new WorldPoint(1446, 3108, 0)),
+		Map.entry("Salvager Overlook", new WorldPoint(1613, 3300, 0)),
+		Map.entry("Tal Teklan", new WorldPoint(1226, 3091, 0)),
+		Map.entry("Kastori", new WorldPoint(1344, 3022, 0)),
+		Map.entry("Auburnvale", new WorldPoint(1411, 3361, 0)));
+	private static final Map<String, Integer> QUETZAL_WHISTLE_UNLOCK_VARBITS = Map.of(
+		"Fortis Colosseum", 9958,
+		"Outer Fortis", 9957,
+		"Colossal Wyrm Remains", 9956,
+		"Cam Torum Entrance", 9955,
+		"Salvager Overlook", 11379,
+		"Kastori", 17757);
+	private static final Set<Set<Integer>> BURNING_AMULET_ITEMS = Set.of(
+		Set.of(21166), Set.of(21169), Set.of(21171), Set.of(21173), Set.of(21175));
+
+	private ItemTeleportPolicy()
+	{
+	}
+
+	public static boolean isEligible(Transport transport)
+	{
+		if (net.runelite.client.plugins.microbot.util.leaguetransport.Rs2MapOfAlacrityTransport.isStagedRoute(transport))
+		{
+			return true;
+		}
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null || transport.getDestination() == null
+			|| transport.getCurrencyAmount() != 0 || transport.getItemIdRequirements().isEmpty()
+			|| (!ACTIONS.containsKey(transport.getDisplayInfo())
+				&& !MASTER_SCROLL_BOOK_WIDGETS.containsKey(transport.getDisplayInfo())))
+		{
+			return false;
+		}
+		Set<Integer> ids = ITEMS.get(transport.getDisplayInfo().split(":", 2)[0]);
+		if ("Construction cape: Tele to POH".equals(transport.getDisplayInfo())
+			&& (transport.isConsumable() || !hasDirectedHousePreference(transport)))
+		{
+			return false;
+		}
+		if ("Teleport to House tablet: Inside".equals(transport.getDisplayInfo())
+			&& (!transport.isConsumable() || !transport.getDestination().equals(
+				net.runelite.client.plugins.microbot.shortestpath.PohPanel.getExitPortalTile())))
+		{
+			return false;
+		}
+		if ("Teleport to House tablet: Outside".equals(transport.getDisplayInfo())
+			&& !isPohOutsideTablet(transport))
+		{
+			return false;
+		}
+		if (transport.getDisplayInfo().startsWith("Burning amulet:")
+			&& !isBurningAmulet(transport))
+		{
+			return false;
+		}
+		if (transport.getDisplayInfo().startsWith("Camulet:")
+			&& !isCamulet(transport))
+		{
+			return false;
+		}
+		if (transport.getDisplayInfo().startsWith("Hunter cape:")
+			&& !isAuditedHunterCape(transport))
+		{
+			return false;
+		}
+		if ("Mokhaiotl waystone: Channel".equals(transport.getDisplayInfo())
+			&& !isMokhaiotlWaystone(transport))
+		{
+			return false;
+		}
+		if ("Mythical cape: Teleport".equals(transport.getDisplayInfo())
+			&& !isMythicalCape(transport))
+		{
+			return false;
+		}
+		if (transport.getDisplayInfo().startsWith("Max cape:")
+			&& !isAuditedMaxCape(transport))
+		{
+			return false;
+		}
+		if ("Ardougne cloak: Farm".equals(transport.getDisplayInfo())
+			&& !isUnlimitedArdougneFarm(transport))
+		{
+			return false;
+		}
+		if ("Calcified moth: Crush".equals(transport.getDisplayInfo())
+			&& !isCalcifiedMoth(transport))
+		{
+			return false;
+		}
+		if ("Chronicle: Teleport".equals(transport.getDisplayInfo())
+			&& !isChronicle(transport))
+		{
+			return false;
+		}
+		if ("Drakan's medallion: Slepe".equals(transport.getDisplayInfo())
+			&& !isSlepeMedallion(transport))
+		{
+			return false;
+		}
+		if ("Pharaoh's sceptre: Jaltevas".equals(transport.getDisplayInfo())
+			&& !isJaltevasSceptre(transport))
+		{
+			return false;
+		}
+		if (isQuetzalWhistle(transport) && !isExactQuetzalWhistle(transport))
+		{
+			return false;
+		}
+		if ("Stony basalt: Troll Stronghold".equals(transport.getDisplayInfo())
+			&& !transport.getDestination().equals(new WorldPoint(2845, 3694, 0))
+			&& !transport.getDestination().equals(new WorldPoint(2837, 3695, 0)))
+		{
+			return false;
+		}
+		return transport.getItemIdRequirements().stream()
+			.allMatch(group -> !group.isEmpty() && ids.containsAll(group));
+	}
+
+	public static boolean isQuetzalWhistle(Transport transport)
+	{
+		return transport != null && transport.getDisplayInfo() != null
+			&& transport.getDisplayInfo().startsWith("Quetzal whistle:");
+	}
+
+	static boolean hasDirectedHousePreference(Transport transport)
+	{
+		if (transport.getVarbits().size() != 2) return false;
+		Integer outside = null;
+		Integer location = null;
+		for (TransportVarbit gate : transport.getVarbits())
+		{
+			if (gate.getOperator() != TransportVarbit.Operator.EQUAL) return false;
+			if (gate.getVarbitId() == net.runelite.api.gameval.VarbitID.POH_TELE_TOGGLE) outside = gate.getValue();
+			if (gate.getVarbitId() == net.runelite.api.gameval.VarbitID.POH_HOUSE_LOCATION) location = gate.getValue();
+		}
+		if (outside == null || location == null) return false;
+		for (net.runelite.client.plugins.microbot.util.poh.data.HouseLocation house
+			: net.runelite.client.plugins.microbot.util.poh.data.HouseLocation.values())
+		{
+			if (house.getVarbitValue() == location)
+			{
+				return outside == 0 ? transport.getDestination().equals(
+					net.runelite.client.plugins.microbot.shortestpath.PohPanel.getExitPortalTile())
+					: outside == 1 && transport.getDestination().equals(house.getPortalLocation());
+			}
+		}
+		return false;
+	}
+
+	public static String quetzalWhistleDestination(Transport transport)
+	{
+		return !isQuetzalWhistle(transport) ? ""
+			: transport.getDisplayInfo().substring("Quetzal whistle:".length()).trim();
+	}
+
+	private static boolean isExactQuetzalWhistle(Transport transport)
+	{
+		String destination = quetzalWhistleDestination(transport);
+		if (transport.getOrigin() != null || !transport.isMembers() || !transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(29271), Set.of(29273), Set.of(29275)))
+			|| !transport.getQuests().equals(Map.of(Quest.CHILDREN_OF_THE_SUN, QuestState.FINISHED))
+			|| !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| !Objects.equals(QUETZAL_WHISTLE_DESTINATIONS.get(destination),
+				transport.getDestination()))
+		{
+			return false;
+		}
+		Integer unlock = QUETZAL_WHISTLE_UNLOCK_VARBITS.get(destination);
+		return transport.getVarbits().size() == (unlock == null ? 1 : 2)
+			&& hasEqualVarbit(transport, 19681, 0)
+			&& (unlock == null || hasEqualVarbit(transport, unlock, 1));
+	}
+
+	private static boolean hasEqualVarbit(Transport transport, int id, int value)
+	{
+		return transport.getVarbits().stream().anyMatch(gate -> gate.getVarbitId() == id
+			&& gate.getValue() == value && gate.getOperator() == TransportVarbit.Operator.EQUAL);
+	}
+
+	public static boolean isBurningAmulet(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null || !transport.isMembers() || !transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0 || !transport.getQuests().isEmpty()
+			|| !transport.getVarbits().isEmpty() || !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| !BURNING_AMULET_ITEMS.equals(transport.getItemIdRequirements()))
+		{
+			return false;
+		}
+		return BURNING_AMULET_DESTINATIONS.containsKey(transport.getDisplayInfo())
+			&& Objects.equals(transport.getDestination(),
+			BURNING_AMULET_DESTINATIONS.get(transport.getDisplayInfo()));
+	}
+
+	private static boolean isMokhaiotlWaystone(Transport transport)
+	{
+		return transport != null && transport.getType() == TransportType.TELEPORTATION_ITEM
+			&& transport.getOrigin() == null
+			&& Objects.equals(transport.getDestination(), new WorldPoint(1311, 9497, 0))
+			&& "Mokhaiotl waystone: Channel".equals(transport.getDisplayInfo())
+			&& transport.isMembers() && transport.isConsumable()
+			&& transport.getDuration() == 4 && transport.getMaxWildernessLevel() == 29
+			&& transport.getCurrencyAmount() == 0
+			&& transport.getItemIdRequirements().equals(Set.of(Set.of(31099)))
+			&& transport.getQuests().equals(Map.of(Quest.THE_FINAL_DAWN, QuestState.FINISHED))
+			&& transport.getVarbits().isEmpty() && transport.getVarplayers().isEmpty()
+			&& java.util.Arrays.stream(transport.getSkillLevels()).allMatch(level -> level == 0);
+	}
+
+	private static boolean isMythicalCape(Transport transport)
+	{
+		return transport != null && transport.getType() == TransportType.TELEPORTATION_ITEM
+			&& transport.getOrigin() == null
+			&& Objects.equals(transport.getDestination(), new WorldPoint(2457, 2850, 0))
+			&& "Mythical cape: Teleport".equals(transport.getDisplayInfo())
+			&& transport.isMembers() && !transport.isConsumable()
+			&& transport.getDuration() == 4 && transport.getMaxWildernessLevel() == 19
+			&& transport.getCurrencyAmount() == 0
+			&& transport.getItemIdRequirements().equals(Set.of(Set.of(22114), Set.of(24855)))
+			&& transport.getQuests().isEmpty() && transport.getVarbits().isEmpty()
+			&& transport.getVarplayers().isEmpty()
+			&& java.util.Arrays.stream(transport.getSkillLevels()).allMatch(level -> level == 0);
+	}
+
+	private static boolean isAuditedMaxCape(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null || !transport.isMembers() || transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0 || !transport.getQuests().isEmpty()
+			|| !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0))
+		{
+			return false;
+		}
+		if ("Max cape: Home".equals(transport.getDisplayInfo()))
+		{
+			if (!transport.getItemIdRequirements().equals(Set.of(Set.of(13280), Set.of(13342)))
+				|| transport.getVarbits().size() != 1)
+			{
+				return false;
+			}
+			TransportVarbit gate = transport.getVarbits().iterator().next();
+			return gate.getVarbitId() == 2187 && gate.getOperator() == TransportVarbit.Operator.EQUAL
+				&& Objects.equals(transport.getDestination(), HOUSE_EXTERIORS.get(gate.getValue()));
+		}
+		WorldPoint destination = MAX_CAPE_DESTINATIONS.get(transport.getDisplayInfo());
+		if (destination == null || !Objects.equals(transport.getDestination(), destination))
+		{
+			return false;
+		}
+		boolean hunterArea = isHunterArea(transport);
+		Set<Set<Integer>> expectedItems = hunterArea
+			|| "Max cape: Crafting Guild".equals(transport.getDisplayInfo())
+			? Set.of(Set.of(13280), Set.of(13342)) : Set.of(Set.of(13280));
+		return transport.getItemIdRequirements().equals(expectedItems)
+			&& (hunterArea ? hasOnlyDailyHunterGate(transport) : transport.getVarbits().isEmpty());
+	}
+
+	private static boolean isAuditedHunterCape(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null || !transport.isMembers() || transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0 || !transport.getQuests().isEmpty()
+			|| !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(9948), Set.of(9949)))
+			|| !hasOnlyDailyHunterGate(transport))
+		{
+			return false;
+		}
+		WorldPoint destination = "Hunter cape: Feldip Hills".equals(transport.getDisplayInfo())
+			? new WorldPoint(2556, 2917, 0) : "Hunter cape: Black chinchompa".equals(transport.getDisplayInfo())
+			? new WorldPoint(3144, 3772, 0) : null;
+		return Objects.equals(destination, transport.getDestination());
+	}
+
+	private static boolean isCamulet(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null || !transport.isMembers() || transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0 || !transport.getQuests().isEmpty()
+			|| !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(6707))))
+		{
+			return false;
+		}
+		boolean entrance = "Camulet: Enakhra's Temple Entrance".equals(transport.getDisplayInfo());
+		WorldPoint destination = entrance ? new WorldPoint(3191, 2924, 0)
+			: "Camulet: Enakhra's Temple".equals(transport.getDisplayInfo())
+			? new WorldPoint(3105, 9315, 2) : null;
+		return Objects.equals(destination, transport.getDestination())
+			&& transport.getVarbits().size() == (entrance ? 2 : 1)
+			&& hasVarbit(transport, 1574, 0, TransportVarbit.Operator.GREATER_THAN)
+			&& (!entrance || hasVarbit(transport, 4485, 1, TransportVarbit.Operator.EQUAL));
+	}
+
+	private static boolean hasOnlyDailyHunterGate(Transport transport)
+	{
+		return transport.getVarbits().size() == 1
+			&& hasVarbit(transport, 4819, 5, TransportVarbit.Operator.LESS_THAN);
+	}
+
+	private static boolean hasVarbit(Transport transport, int id, int value,
+		TransportVarbit.Operator operator)
+	{
+		return transport.getVarbits().stream().anyMatch(gate -> gate.getVarbitId() == id
+			&& gate.getValue() == value && gate.getOperator() == operator);
+	}
+
+	public static boolean isHunterArea(Transport transport)
+	{
+		return transport != null && transport.getDisplayInfo() != null
+			&& (transport.getDisplayInfo().startsWith("Hunter cape:")
+			|| "Max cape: Feldip Hills".equals(transport.getDisplayInfo())
+			|| "Max cape: Black chinchompa".equals(transport.getDisplayInfo()));
+	}
+
+	public static boolean isBlackHunterArea(Transport transport)
+	{
+		return isHunterArea(transport)
+			&& transport.getDestination().equals(new WorldPoint(3144, 3772, 0));
+	}
+
+	public static boolean requiresInventorySurface(Transport transport)
+	{
+		return transport != null && transport.getDisplayInfo() != null
+			&& (Rs2MapOfAlacrityTransport.isStagedRoute(transport)
+			|| transport.getDisplayInfo().startsWith("Camulet:")
+			|| "Max cape: Feldip Hills".equals(transport.getDisplayInfo())
+			|| "Max cape: Black chinchompa".equals(transport.getDisplayInfo()));
+	}
+
+	public static boolean isInventoryRestorationTarget(int itemId, WorldPoint destination)
+	{
+		return itemId == 6707 && (new WorldPoint(3105, 9315, 2).equals(destination)
+			|| new WorldPoint(3191, 2924, 0).equals(destination))
+			|| itemId == 13342 && (new WorldPoint(2556, 2917, 0).equals(destination)
+			|| new WorldPoint(3144, 3772, 0).equals(destination));
+	}
+
+	private static boolean isUnlimitedArdougneFarm(Transport transport)
+	{
+		return transport != null && transport.getType() == TransportType.TELEPORTATION_ITEM
+			&& transport.getOrigin() == null
+			&& Objects.equals(transport.getDestination(), new WorldPoint(2664, 3374, 0))
+			&& transport.isMembers() && !transport.isConsumable()
+			&& transport.getDuration() == 4 && transport.getMaxWildernessLevel() == 19
+			&& transport.getCurrencyAmount() == 0
+			&& transport.getItemIdRequirements().equals(Set.of(Set.of(13124), Set.of(20760)))
+			&& transport.getQuests().isEmpty() && transport.getVarbits().isEmpty()
+			&& transport.getVarplayers().isEmpty()
+			&& java.util.Arrays.stream(transport.getSkillLevels()).allMatch(level -> level == 0);
+	}
+
+	private static boolean isCalcifiedMoth(Transport transport)
+	{
+		return transport != null && transport.getType() == TransportType.TELEPORTATION_ITEM
+			&& transport.getOrigin() == null
+			&& Objects.equals(transport.getDestination(), new WorldPoint(1439, 9564, 0))
+			&& transport.isMembers() && transport.isConsumable()
+			&& transport.getDuration() == 4 && transport.getMaxWildernessLevel() == 20
+			&& transport.getCurrencyAmount() == 0
+			&& transport.getItemIdRequirements().equals(Set.of(Set.of(29090)))
+			&& transport.getQuests().equals(Map.of(Quest.PERILOUS_MOONS, QuestState.FINISHED))
+			&& transport.getVarbits().isEmpty() && transport.getVarplayers().isEmpty()
+			&& java.util.Arrays.stream(transport.getSkillLevels()).allMatch(level -> level == 0);
+	}
+
+	private static boolean isSlepeMedallion(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null
+			|| !Objects.equals(transport.getDestination(), new WorldPoint(3808, 9700, 0))
+			|| !transport.isMembers() || transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(22400)))
+			|| !transport.getQuests().isEmpty() || !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| transport.getVarbits().size() != 1)
+		{
+			return false;
+		}
+		TransportVarbit unlock = transport.getVarbits().iterator().next();
+		return unlock.getVarbitId() == 12416 && unlock.getValue() == 1
+			&& unlock.getOperator() == TransportVarbit.Operator.EQUAL;
+	}
+
+	private static boolean isChronicle(Transport transport)
+	{
+		return transport != null && transport.getType() == TransportType.TELEPORTATION_ITEM
+			&& transport.getOrigin() == null
+			&& Objects.equals(transport.getDestination(), new WorldPoint(3200, 3355, 0))
+			&& !transport.isMembers() && transport.isConsumable()
+			&& transport.getDuration() == 4 && transport.getMaxWildernessLevel() == 0
+			&& transport.getCurrencyAmount() == 0
+			&& transport.getItemIdRequirements().equals(Set.of(Set.of(13660)))
+			&& transport.getQuests().isEmpty() && transport.getVarbits().isEmpty()
+			&& transport.getVarplayers().isEmpty()
+			&& java.util.Arrays.stream(transport.getSkillLevels()).allMatch(level -> level == 0);
+	}
+
+	private static boolean isJaltevasSceptre(Transport transport)
+	{
+		if (transport == null || transport.getType() != TransportType.TELEPORTATION_ITEM
+			|| transport.getOrigin() != null
+			|| !Objects.equals(transport.getDestination(), new WorldPoint(3313, 2718, 0))
+			|| !transport.isMembers() || !transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| transport.getCurrencyAmount() != 0
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(26948), Set.of(26950)))
+			|| !transport.getQuests().isEmpty() || !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| transport.getVarbits().size() != 1)
+		{
+			return false;
+		}
+		TransportVarbit unlock = transport.getVarbits().iterator().next();
+		return unlock.getVarbitId() == 13839 && unlock.getValue() == 1
+			&& unlock.getOperator() == TransportVarbit.Operator.EQUAL;
+	}
+
+	private static boolean isPohOutsideTablet(Transport transport)
+	{
+		if (!transport.isMembers() || !transport.isConsumable()
+			|| transport.getDuration() != 4 || transport.getMaxWildernessLevel() != 19
+			|| !transport.getQuests().isEmpty() || !transport.getVarplayers().isEmpty()
+			|| java.util.Arrays.stream(transport.getSkillLevels()).anyMatch(level -> level != 0)
+			|| !transport.getItemIdRequirements().equals(Set.of(Set.of(8013)))
+			|| transport.getVarbits().size() != 1)
+		{
+			return false;
+		}
+		TransportVarbit gate = transport.getVarbits().iterator().next();
+		return gate.getVarbitId() == 2187 && gate.getOperator() == TransportVarbit.Operator.EQUAL
+			&& transport.getDestination().equals(HOUSE_EXTERIORS.get(gate.getValue()));
+	}
+
+	public static String inventoryAction(Transport transport)
+	{
+		if (Rs2MapOfAlacrityTransport.isStagedRoute(transport))
+		{
+			return "Read";
+		}
+		if (!isEligible(transport))
+		{
+			return null;
+		}
+		if ("Stony basalt: Troll Stronghold".equals(transport.getDisplayInfo()))
+		{
+			return transport.getDestination().equals(new WorldPoint(2837, 3695, 0))
+				? "Troll Stronghold roof" : "Troll Stronghold entrance";
+		}
+		return isMasterScrollBook(transport) ? "Open" : ACTIONS.get(transport.getDisplayInfo());
+	}
+
+	public static boolean isMasterScrollBook(Transport transport)
+	{
+		return transport != null && MASTER_SCROLL_BOOK_WIDGETS.containsKey(transport.getDisplayInfo());
+	}
+
+	public static int masterScrollBookWidget(Transport transport)
+	{
+		return isMasterScrollBook(transport) ? MASTER_SCROLL_BOOK_WIDGETS.get(transport.getDisplayInfo()) : -1;
+	}
+
+	public static String destination(Transport transport)
+	{
+		return isMasterScrollBook(transport)
+			? transport.getDisplayInfo().substring("Master Scroll Book: ".length()) : null;
+	}
+
+	public static String equipmentAction(Transport transport)
+	{
+		if (!isEligible(transport))
+		{
+			return null;
+		}
+		if ("Strength cape: Warriors' Guild".equals(transport.getDisplayInfo()))
+		{
+			return "Warriors' Guild";
+		}
+		if (requiresInventorySurface(transport))
+		{
+			return null;
+		}
+		if (transport.getDisplayInfo().startsWith("Max cape:")
+			&& !"Max cape: Home".equals(transport.getDisplayInfo())
+			&& !"Max cape: Crafting Guild".equals(transport.getDisplayInfo()))
+		{
+			return null;
+		}
+		if ("Ring of shadows: Ancient Vault".equals(transport.getDisplayInfo()))
+		{
+			return "Ancient Vault";
+		}
+		String family = transport.getDisplayInfo().split(":", 2)[0];
+		switch (family)
+		{
+			case "Master Scroll Book":
+			case "Quetzal whistle":
+			case "Calcified moth":
+			case "Mokhaiotl waystone":
+			case "Teleport crystal":
+			case "Eternal teleport crystal":
+			case "Icy basalt":
+			case "Stony basalt":
+			case "Teleport to House tablet":
+			case "Varrock tablet":
+			case "Watchtower tablet":
+				return null;
+			case "Ardougne cloak":
+				return "Ardougne cloak: Farm".equals(transport.getDisplayInfo())
+					? "Ardougne Farm" : "Kandarin Monastery";
+			case "Morytania legs":
+				return "Morytania legs: Ecto Teleport".equals(transport.getDisplayInfo())
+					? "Ectofuntus Pit" : "Burgh de Rott";
+			default:
+				return inventoryAction(transport);
+		}
+	}
+}

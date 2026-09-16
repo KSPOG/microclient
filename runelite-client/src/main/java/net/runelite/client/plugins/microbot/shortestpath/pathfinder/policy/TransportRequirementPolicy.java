@@ -1,13 +1,24 @@
 package net.runelite.client.plugins.microbot.shortestpath.pathfinder.policy;
 
+import net.runelite.api.NPC;
+import net.runelite.api.Quest;
 import net.runelite.api.QuestState;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.walker.transport.EquippedSafetyTransitionPolicy;
+import net.runelite.client.plugins.microbot.util.walker.transport.ElidCrevicePolicy;
+import net.runelite.client.plugins.microbot.util.walker.transport.LumbridgeSwampCavePolicy;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 public final class TransportRequirementPolicy {
+    private static final String ECTO_TOKEN = "ecto-token";
+    private static final Set<Integer> GHOSTSPEAK_ITEMS = Set.of(
+            552, 4250, 13113, 13114, 13115);
+
     private TransportRequirementPolicy() {
     }
 
@@ -35,5 +46,175 @@ public final class TransportRequirementPolicy {
         return transport.getVarplayers().isEmpty()
                 || transport.getVarplayers().stream()
                 .allMatch(varplayerCheck -> varplayerCheck.matches(Microbot.getVarbitPlayerValue(varplayerCheck.getVarplayerId())));
+    }
+
+    /**
+     * Returns the currency amount that applies to the player's current quest state.
+     *
+     * <p>The Port Phasmatys barrier rows encode their pre-quest two-token toll only in the
+     * interaction action. After Ghosts Ahoy the same barrier is free. Unknown quest state fails
+     * closed to the toll so routing never assumes a free crossing from a stale player snapshot.
+     */
+    public static int currencyAmount(Transport transport) {
+        if (freeShantayEntry(transport)) return 0;
+        if (!isEctoBarrier(transport)) {
+            return transport == null ? 0 : transport.getCurrencyAmount();
+        }
+        QuestState questState = Microbot.getRs2PlayerStateCache() == null
+                ? null : Rs2Player.getQuestState(Quest.GHOSTS_AHOY);
+        return currencyAmount(transport, questState);
+    }
+
+    static int currencyAmount(Transport transport, QuestState ghostsAhoyState) {
+        if (isEctoBarrier(transport)) {
+            return ghostsAhoyState == QuestState.FINISHED ? 0 : 2;
+        }
+        return transport == null ? 0 : transport.getCurrencyAmount();
+    }
+
+    public static String currencyName(Transport transport) {
+        return isEctoBarrier(transport) ? ECTO_TOKEN
+                : transport == null ? "" : transport.getCurrencyName();
+    }
+
+    /**
+     * Returns item alternatives that apply to the player's current quest state.
+     *
+     * <p>The pre-quest Port Phasmatys toll also requires an equipped ghostspeak item, but the
+     * packaged rows encode only the object action. Keep that conditional requirement outside the
+     * shared transport object so post-quest copies of the same row remain free and itemless.
+     */
+    public static Set<Set<Integer>> itemIdRequirements(Transport transport) {
+        if (freeShantayEntry(transport)) return Collections.emptySet();
+        QuestState questState = Microbot.getRs2PlayerStateCache() == null
+                ? null : Rs2Player.getQuestState(Quest.GHOSTS_AHOY);
+        return itemIdRequirements(transport, questState);
+    }
+
+    /** Item alternatives required in addition to the row's primary item requirement. */
+    public static Set<Integer> additionalReusableItemIds(Transport transport) {
+		Set<Integer> elidLights = ElidCrevicePolicy.lightSourceIds(transport);
+		return elidLights.isEmpty()
+				? LumbridgeSwampCavePolicy.gasSafeLightSourceIds(transport) : elidLights;
+    }
+
+    static Set<Set<Integer>> itemIdRequirements(Transport transport, QuestState ghostsAhoyState) {
+        if (isEctoBarrier(transport) && ghostsAhoyState != QuestState.FINISHED) {
+            return Set.of(GHOSTSPEAK_ITEMS);
+        }
+        Set<Integer> safetyEquipment = EquippedSafetyTransitionPolicy.requiredEquipmentIds(transport);
+        if (!safetyEquipment.isEmpty()) {
+            return Set.of(safetyEquipment);
+        }
+        return transport == null || transport.getItemIdRequirements() == null
+                ? Collections.emptySet() : transport.getItemIdRequirements();
+    }
+
+    /** The duration-two barrier rows describe the paid pre-quest landing only. */
+    public static boolean questVariantAvailable(Transport transport) {
+		if (!ElidCrevicePolicy.questStageAvailable(transport)) return false;
+        if (isAlKharidPaidGate(transport)) {
+            QuestState state = Microbot.getRs2PlayerStateCache() == null
+                    ? null : Rs2Player.getQuestState(Quest.PRINCE_ALI_RESCUE);
+            return alKharidPaidVariantAvailable(transport, state);
+        }
+        QuestState questState = Microbot.getRs2PlayerStateCache() == null
+                ? null : Rs2Player.getQuestState(Quest.GHOSTS_AHOY);
+        return questVariantAvailable(transport, questState);
+    }
+
+    static boolean questVariantAvailable(Transport transport, QuestState ghostsAhoyState) {
+        return !isEctoBarrier(transport) || transport.isQuestLocked()
+                || transport.getDuration() != 2 || ghostsAhoyState != QuestState.FINISHED;
+    }
+
+    public static Set<Integer> ghostspeakItemIds() {
+        return GHOSTSPEAK_ITEMS;
+    }
+
+    static boolean isAlKharidPaidGate(Transport transport) {
+        return transport != null && transport.getObjectId() >= 2786 && transport.getObjectId() <= 2789
+                && "Gate".equalsIgnoreCase(transport.getName())
+                && "Pay-toll(10gp)".equalsIgnoreCase(transport.getAction());
+    }
+
+    static boolean alKharidPaidVariantAvailable(Transport transport, QuestState state) {
+        return !isAlKharidPaidGate(transport) || state != QuestState.FINISHED;
+    }
+
+    public static boolean isShantayEntry(Transport transport) {
+        return transport != null && (transport.getObjectId() == 4031 || transport.getObjectId() == 41326)
+                && "Shantay pass".equalsIgnoreCase(transport.getName())
+                && "Go-through".equalsIgnoreCase(transport.getAction())
+                && (transport.getItemIdRequirements().equals(Set.of(Set.of(1854)))
+                    || transport.getCurrencyAmount() == 5 && "Coins".equalsIgnoreCase(transport.getCurrencyName()));
+    }
+
+    public static boolean desertPassExempt() {
+        return Microbot.getClient() != null && Microbot.getClientThread().runOnClientThreadOptional(
+                () -> Microbot.getVarbitValue(net.runelite.api.gameval.VarbitID.DESERT_DIARY_ELITE_COMPLETE) == 1)
+                .orElse(false);
+    }
+
+    public static boolean freeShantayEntry(Transport transport) {
+        return isShantayEntry(transport) && freeShantayEntry(transport, desertPassExempt());
+    }
+
+    static boolean freeShantayEntry(Transport transport, boolean eliteDiary) {
+        return eliteDiary && isShantayEntry(transport);
+    }
+
+    public static boolean isBrokenRaft(Transport transport) {
+        return transport != null && transport.getObjectId() == 17068
+                && "Broken Raft".equalsIgnoreCase(transport.getName())
+                && "Grapple".equalsIgnoreCase(transport.getAction());
+    }
+
+    public static boolean brokenRaftEquipmentReady() {
+		return grappleEquipmentReady();
+	}
+
+	public static boolean grappleEquipmentReady() {
+        if (Microbot.getClient() == null) return false;
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            var weapon = net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment.get(
+                    net.runelite.api.EquipmentInventorySlot.WEAPON);
+            var ammo = net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment.get(
+                    net.runelite.api.EquipmentInventorySlot.AMMO);
+            return brokenRaftEquipmentReady(ammo == null ? -1 : ammo.getId(),
+                    weapon == null ? null : weapon.getName());
+        }).orElse(false);
+    }
+
+	public static boolean noFollower()
+	{
+		if (Microbot.getClient() == null)
+		{
+			return false;
+		}
+		return Microbot.getClientThread().runOnClientThreadOptional(
+			() -> noFollower(Microbot.getClient().getFollower())).orElse(false);
+	}
+
+	static boolean noFollower(NPC follower)
+	{
+		return follower == null;
+	}
+
+    static boolean brokenRaftEquipmentReady(int ammoId, String weaponName) {
+		return grappleEquipmentReady(ammoId, weaponName);
+	}
+
+	static boolean grappleEquipmentReady(int ammoId, String weaponName) {
+        if (ammoId != 9419 || weaponName == null) return false;
+        String name = weaponName.toLowerCase(java.util.Locale.ROOT);
+        return !name.equals("love crossbow") && (name.equals("crossbow") || name.endsWith(" crossbow"));
+    }
+
+    private static boolean isEctoBarrier(Transport transport) {
+        return transport != null
+                && transport.getObjectId() == 16105
+                && "Pay-toll(2-Ecto)".equalsIgnoreCase(transport.getAction())
+                && "Energy Barrier".equalsIgnoreCase(transport.getName());
     }
 }

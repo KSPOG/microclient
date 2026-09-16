@@ -46,12 +46,14 @@ public final class LiveCollisionCapture {
      * disagree with what a fresh capture would now produce, so {@link LiveCollisionPersistence} rejects the
      * stale data on load instead of trusting it. This is what removes the manual "Reset learned collision"
      * step: e.g. adding the rockfall exemption changed what a rockfall tile records, so that data must not
-     * survive the change. History: v1 = original translation; v2 = rockfall (26679/26680) exemption.
+     * survive the change. History: v1 = original translation; v2 = rockfall (26679/26680) exemption;
+     * v3 = wall-door footprint deferral. V2 stores could retain blocked diagonal edges around a
+     * closed wall door because the oriented mask covered only the door face.
      * (Door edges changing from unknown to known-passable did NOT need a bump: v2 stores hold no door
      * edges at all — they were always unknown — so old data cannot disagree, it is merely less informed
      * and gets filled in by the next capture.)
      */
-    public static final int CAPTURE_VERSION = 2;
+    public static final int CAPTURE_VERSION = 3;
 
     /**
      * Actions that mark a wall object as a door the walker opens at runtime. Mirrors the door-action set
@@ -131,8 +133,8 @@ public final class LiveCollisionCapture {
 
     /**
      * Scans the loaded scene for objects owned by the runtime door handler. Wall objects contribute
-     * only their oriented door edge; game-object doors contribute the edges touching their footprint
-     * because they do not expose a wall orientation.
+     * their oriented edge plus all edges touching their tile, because a closed wall door can also set
+     * transient corner blocks. Game-object doors contribute all edges touching their footprint.
      */
     private static LiveCollisionDoorMask findDoorEdges(WorldView wv, int planeCount) {
         final Tile[][][] tiles = wv.getScene().getTiles();
@@ -164,6 +166,10 @@ public final class LiveCollisionCapture {
                     if (wall != null && wallDoorIds.computeIfAbsent(
                             wall.getId(), LiveCollisionCapture::isOpenableDoor)) {
                         doorEdges.markWall(z, sx, sy, wall.getOrientationA(), wall.getOrientationB());
+                        // Closed wall doors can also block the diagonal edges cutting their corners.
+                        // Exempt every edge touching the footprint so those transient blocks are never
+                        // learned and persisted as permanent walls.
+                        doorEdges.markGameObject(z, sx, sy, sx, sy);
                     }
                     final GameObject[] gameObjects = tile.getGameObjects();
                     if (gameObjects == null) {

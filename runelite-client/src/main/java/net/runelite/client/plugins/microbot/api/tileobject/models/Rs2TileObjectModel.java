@@ -76,16 +76,30 @@ public class Rs2TileObjectModel implements TileObject, IEntity {
 
     @Override
     public int getPlane() {
-        return tileObject.getPlane();
+        return Microbot.getClientThread().invoke(tileObject::getPlane);
     }
 
     @Override
     public WorldView getWorldView() {
-        return tileObject.getWorldView();
+        return Microbot.getClientThread().invoke(tileObject::getWorldView);
     }
 
     public int getId() {
         return tileObject.getId();
+    }
+
+    public int getSizeX() {
+        return tileObject instanceof GameObject
+                ? Microbot.getClientThread().runOnClientThreadOptional(
+                        () -> ((GameObject) tileObject).sizeX()).orElse(1)
+                : 1;
+    }
+
+    public int getSizeY() {
+        return tileObject instanceof GameObject
+                ? Microbot.getClientThread().runOnClientThreadOptional(
+                        () -> ((GameObject) tileObject).sizeY()).orElse(1)
+                : 1;
     }
 
     @Override
@@ -121,7 +135,7 @@ public class Rs2TileObjectModel implements TileObject, IEntity {
 
     @Override
     public @NotNull LocalPoint getLocalLocation() {
-        return tileObject.getLocalLocation();
+        return Microbot.getClientThread().invoke(tileObject::getLocalLocation);
     }
 
     @Override
@@ -243,12 +257,9 @@ public class Rs2TileObjectModel implements TileObject, IEntity {
             if (action != null) {
                 //performance improvement to only get compoisiton if action has been specified
                 var objComp = getObjectComposition();
-                String[] actions;
-                if (objComp.getImpostorIds() != null && objComp.getImpostor() != null) {
-                    actions = objComp.getImpostor().getActions();
-                } else {
-                    actions = objComp.getActions();
-                }
+                String[] actions = Microbot.getClientThread().invoke(() ->
+                    objComp.getImpostorIds() != null && objComp.getImpostor() != null
+                        ? objComp.getImpostor().getActions() : objComp.getActions());
 
                 for (int i = 0; i < actions.length; i++) {
                     if (actions[i] == null) continue;

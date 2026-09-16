@@ -1,0 +1,444 @@
+package net.runelite.client.plugins.microbot.util.walker.transport;
+
+import net.runelite.api.NPCComposition;
+import net.runelite.api.ObjectComposition;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.widgets.Widget;
+import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
+import net.runelite.client.plugins.microbot.shortestpath.Transport;
+import net.runelite.client.plugins.microbot.shortestpath.TransportEdgeMatcher;
+import net.runelite.client.plugins.microbot.util.dialogues.Rs2Dialogue;
+import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
+import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
+import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
+import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationEngineRuntime;
+import net.runelite.client.plugins.microbot.util.walker.navigation.NavigationSnapshot;
+import net.runelite.client.plugins.microbot.util.walker.navigation.RouteInteraction;
+import net.runelite.client.plugins.microbot.util.walker.obstacle.PlannedEdge;
+import net.runelite.client.plugins.microbot.util.walker.transport.model.NpcDialogueTransport;
+
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/** Resolves the actor, continue, and destination-option stages of a dialogue-menu route. */
+public final class Rs2NpcDialogueTransportScene implements NpcDialogueTransportScene
+{
+	@Override
+	public NpcDialogueTransport find(PlannedEdge edge)
+	{
+		NpcDialogueTransport unavailable = unavailableFossilRowboat(edge);
+		if (unavailable != null) return unavailable;
+		Transport transport = findTransport(edge);
+		return transport == null ? null : actorStage(transport);
+	}
+
+	@Override
+	public NpcDialogueTransport observe(PlannedEdge edge, String pendingAction)
+	{
+		NpcDialogueTransport unavailable = NpcDialogueTransportPolicy.isVoyageStageAction(pendingAction)
+			? null : unavailableFossilRowboat(edge);
+		if (unavailable != null) return unavailable;
+		Transport transport = findTransport(edge);
+		if (transport == null)
+		{
+			return null;
+		}
+		if (Rs2Dialogue.hasSelectAnOption())
+		{
+			if (destinationOptionVisible(NpcDialogueTransportPolicy.destinationOption(transport)))
+			{
+				return stage(transport, transport.getOrigin(),
+					NpcDialogueTransport.Stage.DESTINATION);
+			}
+			if (NpcDialogueTransportPolicy.isCabinBoyHerbert(transport)
+				&& matchTravelRequestIndex(optionTexts()) >= 0)
+			{
+				return stage(transport, transport.getOrigin(),
+					NpcDialogueTransport.Stage.TRAVEL_REQUEST);
+			}
+			// Paid rows confirm the fare through a single affirmative option; a menu that
+			// is neither the declared destination nor a lone affirmative is foreign and
+			// never receives input.
+			if (transport.getCurrencyAmount() > 0 && confirmOptionVisible())
+			{
+				return stage(transport, transport.getOrigin(),
+					NpcDialogueTransport.Stage.CONFIRM);
+			}
+			return null;
+		}
+		if (Rs2Dialogue.hasContinue())
+		{
+			return stage(transport, transport.getOrigin(), NpcDialogueTransport.Stage.CONTINUE);
+		}
+		if (NpcDialogueTransportPolicy.EQUIP_GHOSTSPEAK_ACTION.equals(pendingAction)
+			|| NpcDialogueTransportPolicy.EQUIP_GOLD_HELMET_ACTION.equals(pendingAction))
+		{
+			return actorStage(transport);
+		}
+		if (NpcDialogueTransportPolicy.isStageAction(pendingAction))
+		{
+			// The dialogue closed after a stage command: the voyage is starting or has
+			// started. Preserve the exact landing predicate until the deadline.
+			return null;
+		}
+		return actorStage(transport);
+	}
+
+	@Override
+	public boolean hasContinue()
+	{
+		return Rs2Dialogue.hasContinue();
+	}
+
+	public static boolean destinationOptionVisible(String destinationOption)
+	{
+		return matchOptionIndex(optionTexts(), destinationOption) >= 0;
+	}
+
+	/** Clicks the declared destination option using the same matching as observation. */
+	public static boolean selectDestinationOption(String destinationOption)
+	{
+		int index = matchOptionIndex(optionTexts(), destinationOption);
+		return index >= 0 && Rs2Dialogue.keyPressForDialogueOption(index + 1);
+	}
+
+	public static boolean confirmOptionVisible()
+	{
+		return matchConfirmIndex(optionTexts()) >= 0;
+	}
+
+	/** Clicks the single affirmative fare-confirmation option. */
+	public static boolean selectConfirmOption()
+	{
+		int index = matchConfirmIndex(optionTexts());
+		return index >= 0 && Rs2Dialogue.keyPressForDialogueOption(index + 1);
+	}
+
+	/**
+	 * Payment prompts phrase the affirmative differently per captain ({@code Yes please.},
+	 * {@code Ok}); the negative always reads as a refusal. Accept exactly one option whose
+	 * text starts with an affirmative word, and refuse ambiguity.
+	 */
+	static int matchConfirmIndex(List<String> options)
+	{
+		if (options == null)
+		{
+			return -1;
+		}
+		int affirmative = -1;
+		for (int i = 0; i < options.size(); i++)
+		{
+			String text = normalizeText(options.get(i));
+			if (text.startsWith("yes") || text.startsWith("ok"))
+			{
+				if (affirmative >= 0)
+				{
+					return -1;
+				}
+				affirmative = i;
+			}
+		}
+		return affirmative;
+	}
+
+	/**
+	 * An exact option always wins, so prefixed destinations such as Molch and Molch
+	 * Island cannot be confused. Some NPC menus phrase the option as a sentence
+	 * ({@code Can you take me to Port Sarim please?}), so with no exact match a single
+	 * option containing the destination is accepted; ambiguous containment is refused.
+	 */
+	static int matchOptionIndex(List<String> options, String destinationOption)
+	{
+		String needle = normalizeText(destinationOption);
+		if (options == null || needle.isEmpty())
+		{
+			return -1;
+		}
+		for (int i = 0; i < options.size(); i++)
+		{
+			if (normalizeText(options.get(i)).equals(needle))
+			{
+				return i;
+			}
+		}
+		int containing = -1;
+		for (int i = 0; i < options.size(); i++)
+		{
+			if (normalizeText(options.get(i)).contains(needle))
+			{
+				if (containing >= 0)
+				{
+					return -1;
+				}
+				containing = i;
+			}
+		}
+		return containing;
+	}
+
+	private static List<String> optionTexts()
+	{
+		return Microbot.getClientThread().runOnClientThreadOptional(
+			Rs2NpcDialogueTransportScene::optionTextsOnClientThread)
+			.orElse(java.util.Collections.emptyList());
+	}
+
+	/** Matches only Herbert's exact, unique first menu option. */
+	static int matchTravelRequestIndex(List<String> options)
+	{
+		if (options == null)
+		{
+			return -1;
+		}
+		String expected = normalizeText(NpcDialogueTransportPolicy.HERBERT_TRAVEL_REQUEST_OPTION);
+		int match = -1;
+		for (int i = 0; i < options.size(); i++)
+		{
+			if (normalizeText(options.get(i)).equals(expected))
+			{
+				if (match >= 0)
+				{
+					return -1;
+				}
+				match = i;
+			}
+		}
+		return match;
+	}
+
+	public static boolean selectTravelRequestOption()
+	{
+		int index = matchTravelRequestIndex(optionTexts());
+		return index >= 0 && Rs2Dialogue.keyPressForDialogueOption(index + 1);
+	}
+
+	/** Cancels only a verified Fossil Island camp menu that omits this planned destination. */
+	public static boolean cancelUnavailableFossilDestination(PlannedEdge edge)
+	{
+		if (edge == null || edge.from() == null || edge.to() == null
+			|| !NpcDialogueTransportPolicy.FOSSIL_CAMP.equals(edge.from()))
+		{
+			return false;
+		}
+		Set<WorldPoint> missing = NpcDialogueTransportPolicy.missingFossilCampDestinations(
+			Rs2Player.getWorldLocation(), optionTexts());
+		return missing != null && missing.contains(edge.to())
+			&& selectDestinationOption("Cancel.");
+	}
+
+	/** Also observes manually opened menus, so a later unlock can replace earlier negative evidence. */
+	public static void observeFossilRowboatMenu()
+	{
+		NavigationSnapshot snapshot = NavigationEngineRuntime.getSnapshot();
+		RouteInteraction pending = snapshot == null ? null : snapshot.getPendingInteraction();
+		if (pending != null && pending.getKind() == RouteInteraction.Kind.NPC_DIALOGUE_TRANSPORT
+			&& pending.getObjectId() == 30914
+			&& NpcDialogueTransportPolicy.isVoyageStageAction(pending.getAction()))
+		{
+			return;
+		}
+		WorldPoint player = Rs2Player.getWorldLocation();
+		if (Rs2PathApi.getPathfinderConfig() != null && player != null
+			&& player.distanceTo(NpcDialogueTransportPolicy.FOSSIL_CAMP)
+				<= NpcDialogueTransportPolicy.LIVE_ACTOR_ORIGIN_TOLERANCE)
+		{
+			Rs2PathApi.getPathfinderConfig().recordFossilRowboatMenu(player, optionTextsOnClientThread());
+		}
+	}
+
+	private static NpcDialogueTransport unavailableFossilRowboat(PlannedEdge edge)
+	{
+		if (edge == null || edge.from() == null || edge.to() == null
+			|| Rs2PathApi.getPathfinderConfig() == null
+			|| Rs2PathApi.getPathfinderConfig().isFossilRowboatRouteEnabled(edge.from(), edge.to()))
+		{
+			return null;
+		}
+		Set<WorldPoint> visibleMissing = NpcDialogueTransportPolicy.missingFossilCampDestinations(
+			Rs2Player.getWorldLocation(), optionTexts());
+		NpcDialogueTransport.Stage stage = visibleMissing != null && visibleMissing.contains(edge.to())
+			? NpcDialogueTransport.Stage.DESTINATION_CANCEL
+			: NpcDialogueTransport.Stage.DESTINATION_UNAVAILABLE;
+		// Preserve unavailability even after a refreshed catalogue has removed this row.
+		return new NpcDialogueTransport(edge.from(), edge.to(), 30914, "Rowboat", "Travel",
+			"", 0, edge.from(), stage);
+	}
+
+	private static List<String> optionTextsOnClientThread()
+	{
+		List<Widget> options = Rs2Dialogue.getDialogueOptions();
+		if (options == null)
+		{
+			return java.util.Collections.emptyList();
+		}
+		List<String> texts = new java.util.ArrayList<>(options.size());
+		for (Widget option : options)
+		{
+			texts.add(option == null ? null : option.getText());
+		}
+		return texts;
+	}
+
+	private static String normalizeText(String text)
+	{
+		return text == null ? "" : Rs2UiHelper.stripTagsToSpace(text).trim()
+			.toLowerCase(java.util.Locale.ROOT).replaceAll("\\s+", " ");
+	}
+
+	private static Transport findTransport(PlannedEdge edge)
+	{
+		if (edge == null || edge.from() == null || edge.to() == null)
+		{
+			return null;
+		}
+		return TransportEdgeMatcher.find(Rs2PathApi.getTransports(), edge.from(), edge.to())
+			.stream().filter(NpcDialogueTransportPolicy::isEligible).findFirst().orElse(null);
+	}
+
+	private static NpcDialogueTransport actorStage(Transport transport)
+	{
+		if (NpcDialogueTransportPolicy.isGhostCaptain(transport)
+			&& !hasEquippedGhostspeakItem())
+		{
+			return stage(transport, transport.getOrigin(),
+				NpcDialogueTransport.Stage.EQUIP_REQUIREMENT);
+		}
+		if (NpcDialogueTransportPolicy.isDondakan(transport)
+			&& !Rs2Equipment.isWearing(NpcDialogueTransportPolicy.goldHelmetId()))
+		{
+			return stage(transport, transport.getOrigin(),
+				NpcDialogueTransport.Stage.EQUIP_REQUIREMENT);
+		}
+		Rs2NpcModel npc = findActorNpc(transport);
+		if (npc != null)
+		{
+			WorldPoint tile = Microbot.getClientThread().runOnClientThreadOptional(
+				npc::getWorldLocation).orElse(null);
+			return stage(transport, tile, NpcDialogueTransport.Stage.ACTOR);
+		}
+		Rs2TileObjectModel object = findActorObject(transport);
+		WorldPoint tile = object == null ? null
+			: Microbot.getClientThread().runOnClientThreadOptional(
+				object::getWorldLocation).orElse(null);
+		return object == null ? null : stage(transport, tile,
+			NpcDialogueTransport.Stage.ACTOR);
+	}
+
+	public static boolean equipGhostspeakItem()
+	{
+		return Rs2Inventory.interact(NpcDialogueTransportPolicy.ghostspeakItemIds().stream()
+			.mapToInt(Integer::intValue).toArray(), "Wear");
+	}
+
+	public static boolean equipGoldHelmet()
+	{
+		return Rs2Inventory.interact(NpcDialogueTransportPolicy.goldHelmetId(), "Wear");
+	}
+
+	static boolean hasEquippedGhostspeakItem()
+	{
+		return Rs2Equipment.isWearing(NpcDialogueTransportPolicy.ghostspeakItemIds().stream()
+			.mapToInt(Integer::intValue).toArray());
+	}
+
+	public static Rs2NpcModel findActorNpc(Transport transport)
+	{
+		if (!NpcDialogueTransportPolicy.isEligible(transport))
+		{
+			return null;
+		}
+		return Rs2Npc.getNpcs(npc -> NpcDialogueTransportPolicy.isLiveNpcMatch(transport,
+			npc.getName(), actions(npc), npc.getWorldLocation()))
+			.min(Comparator
+				.comparingInt((Rs2NpcModel npc) -> npc.getId() == transport.getObjectId() ? 0 : 1)
+				.thenComparingInt(npc -> npc.getWorldLocation()
+					.distanceTo2D(transport.getOrigin())))
+			.orElse(null);
+	}
+
+	public static Rs2TileObjectModel findActorObject(Transport transport)
+	{
+		if (!NpcDialogueTransportPolicy.isEligible(transport))
+		{
+			return null;
+		}
+		return Microbot.getClientThread().runOnClientThreadOptional(() ->
+		{
+			Rs2TileObjectModel best = null;
+			int bestScore = Integer.MAX_VALUE;
+			for (Rs2TileObjectModel candidate : Microbot.getRs2TileObjectCache().query()
+				.within(transport.getOrigin(),
+					NpcDialogueTransportPolicy.LIVE_ACTOR_ORIGIN_TOLERANCE)
+				.toList())
+			{
+				ObjectComposition composition = candidate.getObjectComposition();
+				int id = candidate.getId();
+				WorldPoint tile = candidate.getWorldLocation();
+				String name = composition == null ? null : composition.getName();
+				String[] liveActions = composition == null ? null : composition.getActions();
+				if (tile == null || !NpcDialogueTransportPolicy.isLiveObjectMatch(
+					transport, id, name, liveActions, tile))
+				{
+					continue;
+				}
+				int score = (id == transport.getObjectId() ? 0 : 100)
+					+ tile.distanceTo2D(transport.getOrigin());
+				if (score < bestScore)
+				{
+					best = candidate;
+					bestScore = score;
+				}
+			}
+			return best;
+		}).orElse(null);
+	}
+
+	public static String resolveLiveObjectAction(Rs2TileObjectModel object, String catalogAction)
+	{
+		return object == null ? null : Microbot.getClientThread()
+			.runOnClientThreadOptional(() ->
+			{
+				ObjectComposition composition = object.getObjectComposition();
+				return NpcTransportPolicy.matchAction(
+					composition == null ? null : composition.getActions(), catalogAction);
+			}).orElse(null);
+	}
+
+	/** Resolves the live NPC action, tolerating destination-named quest-state variants. */
+	public static String resolveLiveNpcAction(Rs2NpcModel npc, Transport transport)
+	{
+		return npc == null || transport == null ? null
+			: NpcDialogueTransportPolicy.matchLiveNpcAction(actions(npc),
+				transport.getAction(), transport.getDisplayInfo());
+	}
+
+	private static List<String> actions(Rs2NpcModel npc)
+	{
+		return Stream.of(npc.getComposition(), npc.getTransformedComposition())
+			.filter(java.util.Objects::nonNull)
+			.map(NPCComposition::getActions)
+			.filter(java.util.Objects::nonNull)
+			.flatMap(Arrays::stream)
+			.filter(java.util.Objects::nonNull)
+			.collect(Collectors.toList());
+	}
+
+	private static NpcDialogueTransport stage(Transport transport, WorldPoint tile,
+		NpcDialogueTransport.Stage stage)
+	{
+		return new NpcDialogueTransport(transport.getOrigin(), transport.getDestination(),
+			transport.getObjectId(), transport.getName(), transport.getAction(),
+			NpcDialogueTransportPolicy.destinationOption(transport),
+			NpcDialogueTransportPolicy.isGhostCaptain(transport) ? 0 : transport.getCurrencyAmount(),
+			tile, stage);
+	}
+}
