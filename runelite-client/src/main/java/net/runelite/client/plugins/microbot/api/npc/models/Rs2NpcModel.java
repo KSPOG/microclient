@@ -13,8 +13,8 @@ import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
 import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
+import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
-import net.runelite.client.plugins.microbot.util.walker.recovery.CantReachTargetRecovery;
 
 import java.util.Arrays;
 import java.util.function.Predicate;
@@ -192,11 +192,9 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
 
         Microbot.status = action + " " + npcName;
         try {
-            if (CantReachTargetRecovery.shouldStart(
-                    Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
+            if (Microbot.isCantReachTargetDetectionEnabled && Microbot.cantReachTarget) {
                 if (!hasLineOfSight()) {
-                    if (CantReachTargetRecovery.retryExhausted(
-                            Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                    if (Microbot.cantReachTargetRetries >= Rs2Random.between(3, 5)) {
                         Microbot.pauseAllScripts.compareAndSet(false, true);
                         Microbot.showMessage("Your bot tried to interact with an NPC for "
                                 + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
@@ -207,14 +205,10 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
                         log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npcName, action);
                         return false;
                     }
+                    Rs2Walker.walkTo(Rs2Tile.getNearestWalkableTileWithLineOfSight(npcWorldPoint), 0);
+                    Microbot.pauseAllScripts.compareAndSet(true, false);
                     Microbot.cantReachTargetRetries++;
-                    if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
-                        Microbot.pauseAllScripts.compareAndSet(true, false);
-                        Microbot.cantReachTarget = false;
-                        Microbot.cantReachTargetRetries = 0;
-                    } else {
-                        return false;
-                    }
+                    return false;
                 } else {
                     Microbot.pauseAllScripts.compareAndSet(true, false);
                     Microbot.cantReachTarget = false;
