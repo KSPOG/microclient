@@ -8,11 +8,7 @@ on:
         required: false
         default: development
         type: string
-  push:
-    branches:
-      - development
-    paths:
-      - ".release-trigger"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.parameter || github.ref_name }}
+          ref: ${{ inputs.parameter }}
           fetch-depth: 0
 
       - name: Set up JDK 11

@@ -7,8 +7,6 @@ import net.runelite.api.Point;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
-import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.api.IEntity;
 import net.runelite.client.plugins.microbot.api.boat.Rs2BoatCache;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
@@ -192,15 +190,11 @@ public class Rs2TileObjectModel implements TileObject, IEntity {
             return false;
         }
 
-        if (objectWorldView.getId() != playerWorldView.getId()) {
-            return false;
+        if (objectWorldView.getId() == playerWorldView.getId()) {
+            return true;
         }
 
-        if (tileObject instanceof GameObject) {
-            return Rs2GameObject.isReachable((GameObject) tileObject);
-        }
-
-        return Rs2Tile.isTileReachable(getWorldLocation());
+        return IEntity.super.isReachable();
     }
 
     public boolean click() {
