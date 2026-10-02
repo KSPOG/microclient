@@ -17,6 +17,7 @@ import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.recovery.CantReachTargetRecovery;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
@@ -641,27 +642,29 @@ public class Rs2Npc {
 
         Microbot.status = action + " " + npc.getName();
         try {
-            if (Microbot.isCantReachTargetDetectionEnabled && Microbot.cantReachTarget) {
-                if (!hasLineOfSight(npc)) {
-                    if (Microbot.cantReachTargetRetries >= Rs2Random.between(3, 5)) {
-						Microbot.pauseAllScripts.compareAndSet(false, true);
-                        Microbot.showMessage("Your bot tried to interact with an NPC for "
-                                + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
-                        return false;
-                    }
-                    final WorldPoint npcWorldPoint = npc.getWorldLocation();
-                    if (npcWorldPoint == null) {
-                        log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npc.getName(), action);
-                        return false;
-                    }
-                    Rs2Walker.walkTo(Rs2Tile.getNearestWalkableTileWithLineOfSight(npcWorldPoint), 0);
-                    Microbot.pauseAllScripts.compareAndSet(true, false);
-                    Microbot.cantReachTargetRetries++;
+            if (CantReachTargetRecovery.shouldStart(
+                    Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
+                if (CantReachTargetRecovery.retryExhausted(
+                        Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                    Microbot.pauseAllScripts.compareAndSet(false, true);
+                    Microbot.showMessage("Your bot tried to interact with an NPC for "
+                            + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
                     return false;
-                } else {
-					Microbot.pauseAllScripts.compareAndSet(true, false);
+                }
+                final WorldPoint npcWorldPoint = npc.getWorldLocation();
+                if (npcWorldPoint == null) {
+                    log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npc.getName(), action);
+                    return false;
+                }
+                Microbot.cantReachTargetRetries++;
+                log.info("[Interact] can't-reach recovery: walking to NPC '{}' at {} (attempt {})",
+                        npc.getName(), npcWorldPoint, Microbot.cantReachTargetRetries);
+                if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
+                    Microbot.pauseAllScripts.compareAndSet(true, false);
                     Microbot.cantReachTarget = false;
                     Microbot.cantReachTargetRetries = 0;
+                } else {
+                    return false;
                 }
             }
 
