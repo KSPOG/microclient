@@ -420,9 +420,12 @@ public class Rs2Player {
         if (Microbot.getVarbitPlayerValue(173) == 1 && toggle) return true;
 
         Widget widget = Rs2Widget.getWidget(WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
-        if (widget == null) return false;
+        if (widget == null || widget.isHidden()) return false;
 
-        Microbot.getMouse().click(widget.getCanvasLocation());
+        Rectangle bounds = widget.getBounds();
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) return false;
+
+        Microbot.getMouse().click(bounds);
         sleep(150, 300);
 
         return true;
