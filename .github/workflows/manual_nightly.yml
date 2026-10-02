@@ -5,6 +5,11 @@ on:
     inputs:
       parameter:
         description: branch
+  push:
+    branches:
+      - development
+    paths:
+      - ".release-trigger"
         required: false
         default: development
         type: string
