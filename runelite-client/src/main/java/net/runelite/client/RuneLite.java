@@ -85,6 +85,7 @@ import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManage
 import net.runelite.client.proxy.ProxyChecker;
 import net.runelite.client.proxy.ProxyConfiguration;
 import net.runelite.client.rs.ClientLoader;
+import net.runelite.client.rs.InjectedClientRuntime;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.FatalErrorDialog;
 import net.runelite.client.ui.SplashScreen;
@@ -182,6 +183,9 @@ public class RuneLite
 
 	@Inject
 	private Client client;
+
+	@Inject
+	private InjectedClientRuntime injectedClientRuntime;
 
 	@Inject
 	@Nullable
@@ -466,7 +470,7 @@ public class RuneLite
 		System.setProperty("jagex.disableBouncyCastle", "true");
 		System.setProperty("jagex.userhome", RUNELITE_DIR.getAbsolutePath());
 
-		client.initialize();
+		injectedClientRuntime.initialize();
 
 		SplashScreen.stage(.57, null, "Loading configuration");
 

@@ -45,6 +45,7 @@ import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.MicrobotClientLoader;
 import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
 import net.runelite.client.proxy.ProxyChecker;
+import net.runelite.client.rs.InjectedClientRuntime;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.FatalErrorDialog;
 import net.runelite.client.ui.SplashScreen;
@@ -129,6 +130,9 @@ public class RuneLiteDebug {
     @Inject
     @Nullable
     private Client client;
+
+    @Inject
+    private InjectedClientRuntime injectedClientRuntime;
 
     @Inject
     @Nullable
@@ -330,7 +334,7 @@ public class RuneLiteDebug {
             throw new IllegalStateException("Client failed to load");
         }
 
-        client.initialize();
+        injectedClientRuntime.initialize();
         
         SplashScreen.stage(.57, null, "Loading configuration");
 

@@ -2,6 +2,7 @@
 
 ## Components & Interaction
 - **RuneLite client (`runelite-client`)**: Main application with Microbot hidden plugin (`MicrobotPlugin`) always enabled; entrypoint `net.runelite.client.RuneLite`. Builds shaded distribution via `shadowJar` + `microbotReleaseJar`.
+- **Injected-client runtime**: `InjectedClientRuntime` owns the load/initialize boundary for RuneLite's patched `injected-client` artifact. It exposes explicit lifecycle state and client build metadata while keeping member injection between load and initialization.
 - **Microbot runtime**: `Microbot` singleton exposes caches, utilities, and script lifecycle helpers; `Script` base class drives scheduled script loops; `BlockingEventManager` preempts scripts when required UI/game states are detected.
 - **Queryable caches**: Guice-injected caches (`Rs2NpcCache`, `Rs2PlayerCache`, `Rs2TileItemCache`, `Rs2TileObjectCache`, `Rs2BoatCache`, `Rs2PlayerStateCache`) updated per tick and accessed via `Microbot.getRs2XxxCache().query()` or `.getStream()`. World-view aware for boats.
 - **Utilities (`microbot/util`)**: Facades over RuneLite APIs for player, inventory, banking, walking, etc.; expected to run on script threads, not the client thread.
@@ -10,7 +11,7 @@
 - **Agent Server**: Optional local control surface under `agentserver`; defaults to TCP on `127.0.0.1:8081`, token-gates requests, and can run in UDS or stealth-bind modes.
 
 ## Key Data Flows
-- User starts client → `MicrobotClientLoader` fetches jav_config/world info → RuneLite client loads → `MicrobotPlugin` starts, registers overlays/config panels and initializes caches.
+- User starts client → `ClientLoader` fetches jav_config/world info → `InjectedClientRuntime` loads the patched RuneLite client → Guice injects callbacks/services → the runtime initializes the game engine → `MicrobotPlugin` starts, registers overlays/config panels and initializes caches.
 - Script loop (`Script.run()` implementations) executes on scheduled executors → queries caches via Queryable API → performs interactions through utilities (`Rs2Inventory`, `Rs2Walker`, etc.) → waits with `sleepUntil` helpers.
 - Blocking events (`BlockingEventManager`) continuously validate (e.g., welcome screen, bank popups) → if triggered, they run on a dedicated executor and block script progression until resolved.
 - Telemetry flow: session/version/fact/plugin telemetry is skipped when telemetry is disabled; failures are logged at debug level.
@@ -22,7 +23,7 @@
 
 ## Configuration & Environments
 - Gradle properties: `gradle.properties` holds `microbot.version`, `microbot.commit.sha`, optional repo credentials (`microbot.repo.*`), and `glslang.path` (populated by CI script).
-- Runtime config: `MicrobotClientLoader` consumes `RuneLiteProperties` for jav_config URL; falls back to world-supplied hosts on failure. `MicrobotVersionChecker` logs current version/commit on startup unless telemetry is disabled.
+- Runtime config: `ClientLoader` consumes `RuneLiteProperties` for the jav_config URL and falls back to world-supplied hosts on failure. `MicrobotVersionChecker` logs current version/commit on startup unless telemetry is disabled.
 - Logging: Game chat logging configurable via `MicrobotConfig` (patterns/levels, microbot-only filter); logback appender wired at plugin startup.
 
 ## Non-Obvious Behaviors
