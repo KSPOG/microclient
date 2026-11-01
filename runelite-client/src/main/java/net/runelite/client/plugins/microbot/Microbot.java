@@ -103,7 +103,13 @@ public class Microbot {
     public static boolean enableAutoRunOn = true;
     public static boolean useStaminaPotsIfNeeded = true;
     public static int runEnergyThreshold = 1000;
-    public static boolean isCantReachTargetDetectionEnabled = false;
+    /**
+     * Reactive unreachable-interaction recovery. When the game prints "I can't reach that!"
+     * (for example, a shut door or wall between the player and a clicked NPC/object), the next
+     * interaction routes through the walker before re-clicking. Enabled by default to match
+     * upstream Microbot's interaction behavior.
+     */
+    public static boolean isCantReachTargetDetectionEnabled = true;
 
     @Getter
     @Inject
