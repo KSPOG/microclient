@@ -8328,14 +8328,20 @@ public class Rs2Walker {
         }
     }
 
+    static boolean isRouteCameraTurningEnabled() {
+        ShortestPathConfig currentConfig = config;
+        return currentConfig == null || currentConfig.turnRouteCamera();
+    }
+
     static void alignCameraTowardWalkTarget(WorldPoint walkTarget) {
         WorldPoint routeTarget = currentTarget;
-        if (walkTarget == null || routeTarget == null) {
+        if (!isRouteCameraTurningEnabled() || walkTarget == null || routeTarget == null) {
             return;
         }
         // Rotate after issuing the click so the camera cannot invalidate its canvas position.
         Microbot.getClientThread().invokeLater(() -> {
-            if (!routeTarget.equals(currentTarget) || Microbot.getClient().getLocalPlayer() == null
+            if (!isRouteCameraTurningEnabled() || !routeTarget.equals(currentTarget)
+                    || Microbot.getClient().getLocalPlayer() == null
                     || Microbot.getClient().getGameState() != GameState.LOGGED_IN) {
                 return;
             }
@@ -8387,7 +8393,7 @@ public class Rs2Walker {
                 if (generation != routeCameraTurnGeneration) {
                     return true;
                 }
-                if (!routeTarget.equals(currentTarget)
+                if (!isRouteCameraTurningEnabled() || !routeTarget.equals(currentTarget)
                         || Microbot.getClient().getGameState() != GameState.LOGGED_IN
                         || Microbot.getClient().getLocalPlayer() == null
                         || Microbot.getClient().getLocalPlayer().getWorldLocation().getPlane() != walkTarget.getPlane()

@@ -145,6 +145,17 @@ public interface ShortestPathConfig extends Config {
         return WalkerClickMode.BOTH;
     }
 
+    @ConfigItem(
+            keyName = "turnRouteCamera",
+            name = "Turn camera automatically",
+            description = "Allow Web Walker to turn the camera while following routes and approaching transport objects.",
+            position = -2,
+            section = sectionSettings
+    )
+    default boolean turnRouteCamera() {
+        return true;
+    }
+
     enum WalkerClickMode {
         BOTH("Both"),
         MINIMAP_ONLY("Minimap only"),

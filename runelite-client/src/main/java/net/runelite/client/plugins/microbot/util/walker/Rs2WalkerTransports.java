@@ -1287,7 +1287,7 @@ final class Rs2WalkerTransports {
     }
 
     private static void prepareTransportObjectForInteraction(TileObject tileObject) {
-        if (tileObject == null || tileObject.getLocalLocation() == null) {
+        if (!isRouteCameraTurningEnabled() || tileObject == null || tileObject.getLocalLocation() == null) {
             return;
         }
         if (!Rs2Camera.isTileOnScreen(tileObject)) {
