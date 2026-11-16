@@ -3,7 +3,6 @@ package net.runelite.client.plugins.microbot.util.walker.door;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.TileObject;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 
 /**
  * Object-level door detection: resolve an object's (impostor-aware) composition and decide whether
@@ -16,8 +15,21 @@ public final class Rs2DoorDetection {
     }
 
     /** Resolves an object's composition, following impostor transforms (varbit/varp swaps). */
+    public static ObjectComposition visibleComposition(TileObject object) {
+        if (object == null) {
+            return null;
+        }
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            ObjectComposition comp = Microbot.getClient().getObjectDefinition(object.getId());
+            if (comp == null) {
+                return null;
+            }
+            return comp.getImpostorIds() == null ? comp : comp.getImpostor();
+        }).orElse(null);
+    }
+
     public static ObjectComposition resolveCompositionForDoorProbe(TileObject object) {
-        ObjectComposition comp = Rs2GameObject.convertToObjectComposition(object);
+        ObjectComposition comp = visibleComposition(object);
         if (comp == null) {
             return null;
         }
@@ -42,7 +54,7 @@ public final class Rs2DoorDetection {
             return false;
         }
         String action = Rs2DoorClassifier.pickWalkDoorAction(comp);
-        return Rs2DoorClassifier.isDoorLikeGameObjectName(comp.getName())
-                || (action != null && Rs2DoorClassifier.doorActionPriorityIndex(action) < Integer.MAX_VALUE);
+        return Rs2DoorClassifier.isRouteDoorObject(object instanceof net.runelite.api.WallObject,
+                comp.getName(), action);
     }
 }

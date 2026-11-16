@@ -59,6 +59,7 @@ public class BlockingEventManager
         blockingEvents.add(new BankJagexPopupEvent());
         blockingEvents.add(new PluginPauseEvent());
 		blockingEvents.add(new EnjoyRSChatboxEvent());
+		blockingEvents.add(new MembershipPromptEvent());
 		blockingEvents.add(new DisableWorldSwitcherConfirmationEvent());
 		blockingEvents.add(new HideRoofsEvent());
 
@@ -110,7 +111,7 @@ public class BlockingEventManager
         try {
             validateAndEnqueueWithBackoff();
         } catch (Throwable t) {
-            Microbot.log(Level.ERROR, "BlockingEvent loop error: %s", t);
+            log.error("BlockingEvent loop error", t);
         } finally {
             // re-schedule using the latest currentDelay (volatile)
             loopFuture = scheduler.schedule(this::loopOnce, currentDelay, TimeUnit.MILLISECONDS);
@@ -122,6 +123,7 @@ public class BlockingEventManager
      * and, if true, offers it into the queue (drops if full).
      */
     private void validateAndEnqueueWithBackoff() {
+        if (ScriptPauseController.isPaused()) return;
         boolean hasValidEvents = false;
         if (!SplashScreen.isOpen()) {
             for (BlockingEvent event : blockingEvents) {
@@ -137,10 +139,7 @@ public class BlockingEventManager
                         }
                     }
                 } catch (Exception ex) {
-                    Microbot.log(Level.ERROR,
-                            "Error validating BlockingEvent (%s): %s",
-                            event.getName(),
-                            ex);
+                    Microbot.log("Error validating BlockingEvent (" + event.getName() + ")", Level.ERROR, ex);
                 }
             }
         }
@@ -166,6 +165,7 @@ public class BlockingEventManager
      */
     public boolean shouldBlockAndProcess()
     {
+        if (ScriptPauseController.isPaused()) return true;
         if (isRunning.get())
         {
             return true;
@@ -189,14 +189,14 @@ public class BlockingEventManager
             boolean executedSuccess = false;
             try
             {
-                executedSuccess = event.execute();
+                if (ScriptPauseController.awaitResume()) {
+                    // A queued event may no longer apply after manual play.
+                    executedSuccess = !event.validate() || event.execute();
+                }
             }
             catch (Exception ex)
             {
-                Microbot.log(Level.ERROR,
-                        "Error executing BlockingEvent (%s): %s",
-                        event.getName(),
-                        ex);
+                Microbot.log("Error executing BlockingEvent (" + event.getName() + ")", Level.ERROR, ex);
             }
             finally
             {

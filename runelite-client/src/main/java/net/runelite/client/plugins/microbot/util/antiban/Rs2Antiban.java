@@ -126,6 +126,7 @@ public class Rs2Antiban {
     @Getter
     @Setter
     public static int TIMEOUT = 0;
+    static volatile boolean cooldownPausedScripts = false;
     @Getter
     private static Activity activity;
     @Getter
@@ -218,6 +219,28 @@ public class Rs2Antiban {
         return AntibanPlugin.isIdle();
     }
 
+    public static boolean isCategoryBusy() {
+        Category current = category;
+        return current != null && current.isBusy();
+    }
+
+    public static boolean isCombatCategory() {
+        Category current = category;
+        return current == Category.COMBAT_LOW || current == Category.COMBAT_MID || current == Category.COMBAT_HIGH;
+    }
+
+    static void pauseScriptsForCooldown() {
+        if (Microbot.pauseAllScripts.compareAndSet(false, true))
+            cooldownPausedScripts = true;
+    }
+
+    static void releaseCooldownPause() {
+        if (!cooldownPausedScripts)
+            return;
+        cooldownPausedScripts = false;
+        Microbot.pauseAllScripts.compareAndSet(true, false);
+    }
+
     /**
      * <h2>Handles the Execution of an Action Cooldown Based on Anti-Ban Behaviors</h2>
      * <p>
@@ -261,6 +284,10 @@ public class Rs2Antiban {
      */
 
     public static void actionCooldown() {
+        if (!Rs2AntibanSettings.antibanEnabled) {
+            logDebug("Antiban not enabled, cannot perform action cooldown");
+            return;
+        }
         if (!Rs2AntibanSettings.usePlayStyle) {
             logDebug("PlayStyle not enabled, cannot perform action cooldown");
             return;
@@ -286,20 +313,37 @@ public class Rs2Antiban {
         }
     }
 
+    static PlayStyle resolvePlayStyle() {
+        PlayStyle current = playStyle;
+        if (current != null)
+            return current;
+
+        ActivityIntensity intensity = activityIntensity != null ? activityIntensity : ActivityIntensity.EXTREME;
+        current = Rs2AntibanSettings.randomIntervals ? PlayStyle.RANDOM : intensity.getPlayStyle();
+        current.frequency = intensity.getFrequency();
+        current.amplitude = intensity.getAmplitude();
+        current.resetPlayStyle();
+        playStyle = current;
+        logDebug("No play style set, defaulting to " + current.getName());
+        return current;
+    }
+
     private static void performActionCooldown() {
+        PlayStyle current = resolvePlayStyle();
+
         if (Rs2AntibanSettings.nonLinearIntervals)
-            playStyle.evolvePlayStyle();
+            current.evolvePlayStyle();
 
         if (Rs2AntibanSettings.behavioralVariability)
-            TIMEOUT = playStyle.getRandomTickInterval();
+            TIMEOUT = current.getRandomTickInterval();
         else
-            TIMEOUT = playStyle.getPrimaryTickInterval();
+            TIMEOUT = current.getPrimaryTickInterval();
 
         // The pause (universal antiban only) and the always-set active flag both happen only after
         // TIMEOUT is computed: if computing the interval ever throws, scripts must not be left
         // paused with no countdown to clear them.
-        if (Rs2AntibanSettings.universalAntiban)
-			Microbot.pauseAllScripts.compareAndSet(false, true);
+        if (Rs2AntibanSettings.universalAntiban && !(isCombatCategory() && isCategoryBusy()))
+			pauseScriptsForCooldown();
 
         Rs2AntibanSettings.actionCooldownActive = true;
 
@@ -467,8 +511,8 @@ public class Rs2Antiban {
                 .color(Color.ORANGE).build());
         panelComponent.getChildren().add(LineComponent.builder().build());
         panelComponent.getChildren().add(SplitComponent.builder()
-                .first(LineComponent.builder().left("Activity: " + activity.getMethod()).right(Rs2AntibanSettings.devDebug ? "Dynamic: " + (Rs2AntibanSettings.dynamicActivity ? "✔" : "❌") : "").build())
-                .second(LineComponent.builder().left("Category: " + category.getName()).build()).build());
+                .first(LineComponent.builder().left("Activity: " + (activity != null ? activity.getMethod() : "null")).right(Rs2AntibanSettings.devDebug ? "Dynamic: " + (Rs2AntibanSettings.dynamicActivity ? "✔" : "❌") : "").build())
+                .second(LineComponent.builder().left("Category: " + (category != null ? category.getName() : "null")).build()).build());
         panelComponent.getChildren().add(LineComponent.builder().build());
         panelComponent.getChildren().add(LineComponent.builder().left("Activity Intensity: " + activityIntensity.getName()).right(Rs2AntibanSettings.devDebug ? "Dynamic: " + (Rs2AntibanSettings.dynamicIntensity ? "✔" : "❌") : "").build());
         if (Rs2AntibanSettings.devDebug) {
@@ -482,7 +526,7 @@ public class Rs2Antiban {
             panelComponent.getChildren().add(LineComponent.builder().left("enableProfileSwitching: " + (Rs2AntibanSettings.profileSwitching ? "✔" : "❌")).build());
             panelComponent.getChildren().add(LineComponent.builder().left("adjustForTimeOfDay: " + (Rs2AntibanSettings.timeOfDayAdjust ? "✔" : "❌")).build());
             panelComponent.getChildren().add(LineComponent.builder().left("simulateMistakes: " + (Rs2AntibanSettings.simulateMistakes ? "✔" : "❌")).build());
-            panelComponent.getChildren().add(LineComponent.builder().left("useNaturalMouse: " + (Rs2AntibanSettings.naturalMouse ? "✔" : "❌")).build());
+            panelComponent.getChildren().add(LineComponent.builder().left("aimClicksFromCursor: " + (Rs2AntibanSettings.naturalMouse ? "✔" : "❌")).build());
             panelComponent.getChildren().add(LineComponent.builder().left("useContextualVariability: " + (Rs2AntibanSettings.contextualVariability ? "✔" : "❌")).build());
         }
         if (playStyle != null) {
@@ -491,7 +535,7 @@ public class Rs2Antiban {
                 panelComponent.getChildren().add(LineComponent.builder().left("Play style change in: " + playStyle.getTimeLeftUntilNextSwitch()).build());
             }
             panelComponent.getChildren().add(LineComponent.builder().build());
-            if (Rs2Antiban.getCategory().isBusy()) {
+            if (isCategoryBusy()) {
                 panelComponent.getChildren().add(LineComponent.builder().left("We are busy").build());
             } else {
                 panelComponent.getChildren().add(LineComponent.builder().left("Not busy anymore, breaking").build());
@@ -557,6 +601,9 @@ public class Rs2Antiban {
     public static void resetAntibanSettings(boolean forceReset) {
         if (!forceReset && Rs2AntibanSettings.overwriteScriptSettings) return;
         Rs2AntibanSettings.reset();
+        if (!forceReset) {
+            Rs2AntibanSettings.loadNaturalMouseFromProfile();
+        }
         Rs2Antiban.playStyle = null;
         Rs2Antiban.activity = null;
         Rs2Antiban.activityIntensity = ActivityIntensity.EXTREME;

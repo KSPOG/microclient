@@ -59,7 +59,10 @@ public abstract class AbstractEntityQueryable<
         }
 
         this.source = this.source
-                .filter(o -> o.getWorldLocation().distanceTo(playerLoc) <= distance);
+                .filter(o -> {
+                    WorldPoint loc = o.getWorldLocation();
+                    return loc != null && loc.distanceTo(playerLoc) <= distance;
+                });
 
         return (Q) this;
     }
@@ -73,7 +76,10 @@ public abstract class AbstractEntityQueryable<
         }
 
         this.source = this.source
-                .filter(o -> o.getWorldLocation().distanceTo(anchor) <= distance);
+                .filter(o -> {
+                    WorldPoint loc = o.getWorldLocation();
+                    return loc != null && loc.distanceTo(anchor) <= distance;
+                });
 
         return (Q) this;
     }
@@ -269,6 +275,14 @@ public abstract class AbstractEntityQueryable<
 
     public E nearestOnClientThread(WorldPoint anchor, int maxDistance) {
         return Microbot.getClientThread().invoke(() -> nearest(anchor, maxDistance));
+    }
+
+    public E nearestReachableOnClientThread() {
+        return Microbot.getClientThread().invoke(() -> nearestReachable());
+    }
+
+    public E nearestReachableOnClientThread(int maxDistance) {
+        return Microbot.getClientThread().invoke(() -> nearestReachable(maxDistance));
     }
 
     public List<E> toListOnClientThread() {

@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.MenuAction;
 import net.runelite.api.Skill;
 import net.runelite.api.annotations.Component;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
@@ -25,11 +26,11 @@ import static net.runelite.client.plugins.microbot.util.Global.sleepUntil;
 public class Rs2Prayer {
     
     @Component
-    private static final int QUICK_PRAYER_SELECT_COMPONENT_ID = 5046276;
+    private static final int QUICK_PRAYER_SELECT_COMPONENT_ID = InterfaceID.Quickprayer.BUTTONS;
     @Component
-    private static final int QUICK_PRAYER_DONE_BUTTON_COMPONENT_ID = 5046277;
+    private static final int QUICK_PRAYER_DONE_BUTTON_COMPONENT_ID = InterfaceID.Quickprayer.CLOSE;
     @Component
-    private static final int QUICK_PRAYER_ORB_COMPONENT_ID = 10485779;
+    private static final int QUICK_PRAYER_ORB_COMPONENT_ID = InterfaceID.Orbs.PRAYERBUTTON;
 
 	/**
 	 * Toggles a prayer on or off. If the prayer is already in the desired state, no action is taken.
@@ -81,7 +82,8 @@ public class Rs2Prayer {
 	 * Creates a menu entry and executes it with the appropriate bounds.
 	 *
 	 * @param prayer the prayer to invoke
-	 * @param withMouse true to use mouse clicks with prayer bounds
+	 * @param withMouse true to use the prayer bounds even when the widget reports hidden;
+	 *                  visible prayers are always clicked on their bounds
 	 */
 	private static void invokePrayer(Rs2PrayerEnum prayer, boolean withMouse) {
 		NewMenuEntry menuEntry = new NewMenuEntry()
@@ -92,9 +94,11 @@ public class Rs2Prayer {
 				.itemId(-1)
 				.option("Activate");
 
-		Rectangle prayerBounds = withMouse ? getPrayerBounds(prayer) : Rs2UiHelper.getDefaultRectangle();
+		Rectangle prayerBounds = withMouse || !Rs2Widget.isHidden(prayer.getIndex())
+				? getPrayerBounds(prayer)
+				: Rs2UiHelper.getDefaultRectangle();
 
-        Microbot.doInvoke(menuEntry, prayerBounds);
+        Microbot.doInvokeQuick(menuEntry, prayerBounds);
         // Microbot.getClient().menuAction(-1, prayer.getIndex(), MenuAction.CC_OP, 1, -1, "Activate", "Activate");
 	}
 
@@ -256,7 +260,8 @@ public class Rs2Prayer {
 	 * Invokes the quick prayer orb action
 	 * Creates a menu entry for the quick prayer orb and executes it.
 	 *
-	 * @param withMouse true to use mouse with orb bounds
+	 * @param withMouse true to use the orb bounds even when the orb reports hidden;
+	 *                  a visible orb is always clicked on its bounds
 	 */
 	private static void invokeQuickPrayer(boolean withMouse) {
 		NewMenuEntry entry = new NewMenuEntry()
@@ -267,7 +272,9 @@ public class Rs2Prayer {
 				.itemId(-1)
 				.option("Quick-prayers");
 
-		Microbot.doInvoke(entry, withMouse ? getQuickPrayerOrbBounds() : Rs2UiHelper.getDefaultRectangle());
+		Microbot.doInvokeQuick(entry, withMouse || !Rs2Widget.isHidden(QUICK_PRAYER_ORB_COMPONENT_ID)
+				? getQuickPrayerOrbBounds()
+				: Rs2UiHelper.getDefaultRectangle());
 	}
 
 	/**

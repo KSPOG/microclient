@@ -36,7 +36,7 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
     @Override
     public int getId()
     {
-        return npc.getId();
+        return Microbot.getClientThread().runOnClientThreadOptional(npc::getId).orElse(-1);
     }
 
     public int getIndex()
@@ -56,8 +56,13 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
      */
     public boolean isWithinDistanceFromPlayer(int maxDistance) {
         return Microbot.getClientThread().runOnClientThreadOptional(() -> {
-            return this.getLocalLocation().distanceTo(
-                    Microbot.getClient().getLocalPlayer().getLocalLocation()) <= maxDistance;
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            LocalPoint playerLocation = localPlayer == null ? null : localPlayer.getLocalLocation();
+            LocalPoint npcLocation = this.getLocalLocation();
+            if (playerLocation == null || npcLocation == null) {
+                return false;
+            }
+            return npcLocation.distanceTo(playerLocation) <= maxDistance;
         }).orElse(false);
     }
 
@@ -69,8 +74,13 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
      */
     public int getDistanceFromPlayer() {
         return Microbot.getClientThread().runOnClientThreadOptional(() -> {
-            return this.getLocalLocation().distanceTo(
-                    Microbot.getClient().getLocalPlayer().getLocalLocation());
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            LocalPoint playerLocation = localPlayer == null ? null : localPlayer.getLocalLocation();
+            LocalPoint npcLocation = this.getLocalLocation();
+            if (playerLocation == null || npcLocation == null) {
+                return Integer.MAX_VALUE;
+            }
+            return npcLocation.distanceTo(playerLocation);
         }).orElse(Integer.MAX_VALUE);
     }
 
@@ -196,22 +206,23 @@ public class Rs2NpcModel extends Rs2ActorModel implements IEntity
                     Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
                 if (!hasLineOfSight()) {
                     if (CantReachTargetRecovery.retryExhausted(
-                            Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                            CantReachTargetRecovery.retries(), Rs2Random.between(3, 5))) {
+                        int retries = CantReachTargetRecovery.giveUp();
                         Microbot.pauseAllScripts.compareAndSet(false, true);
                         Microbot.showMessage("Your bot tried to interact with an NPC for "
-                                + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
+                                + retries + " times but failed. Please take a look at what is happening.");
                         return false;
                     }
-                    final WorldPoint npcWorldPoint = getWorldLocation();
+                    final WorldPoint npcWorldPoint = CantReachTargetRecovery.templateLocation(getWorldLocation());
                     if (npcWorldPoint == null) {
                         log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npcName, action);
                         return false;
                     }
-                    Microbot.cantReachTargetRetries++;
+                    CantReachTargetRecovery.countAttempt();
                     if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
                         Microbot.pauseAllScripts.compareAndSet(true, false);
-                        Microbot.cantReachTarget = false;
-                        Microbot.cantReachTargetRetries = 0;
+                        CantReachTargetRecovery.reset();
+                        // fall through and click from beside it
                     } else {
                         return false;
                     }

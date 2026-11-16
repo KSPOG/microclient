@@ -22,6 +22,7 @@ import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -97,7 +98,13 @@ public final class Rs2PlayerStateCache {
 			varbits.put(event.getVarbitId(), event.getValue());
 		}
 		if (event.getVarpId() != -1) {
-			varps.put(event.getVarpId(), event.getValue());
+			// A varbit event carries only the bitfield value, even when it identifies its parent varp.
+			// Drop the parent entry so the next read refetches the full value on the client thread.
+			if (event.getVarbitId() == -1) {
+				varps.put(event.getVarpId(), event.getValue());
+			} else {
+				varps.remove(event.getVarpId());
+			}
 		}
 	}
 
@@ -189,7 +196,12 @@ public final class Rs2PlayerStateCache {
 
 	private @Varbit int updateVarbitValue(@Varbit int varbitId) {
 		return clientThread.runOnClientThreadOptional(() -> {
-			int value = client.getVarbitValue(varbitId);
+			int value;
+			try {
+				value = client.getVarbitValue(varbitId);
+			} catch (NullPointerException | IndexOutOfBoundsException e) {
+				return 0;
+			}
 			// Only cache while logged in: before the initial varp sync completes the client
 			// returns default/stale values, and a wrong entry for a varp the server never
 			// re-sends (zero-valued ones) would stick until the next flush.
@@ -198,6 +210,22 @@ public final class Rs2PlayerStateCache {
 			}
 			return value;
 		}).orElse(0);
+	}
+
+	public Optional<Boolean> isValidVarbitId(int varbitId) {
+		if (varbitId < 0) {
+			return Optional.of(false);
+		}
+		return clientThread.runOnClientThreadOptional(() -> {
+			try {
+				client.getVarbitValue(varbitId);
+			} catch (IndexOutOfBoundsException e) {
+				return false;
+			} catch (NullPointerException e) {
+				return true;
+			}
+			return true;
+		});
 	}
 
 	/**
@@ -218,8 +246,22 @@ public final class Rs2PlayerStateCache {
 		return value;
 	}
 
+	public Optional<Boolean> isValidVarpId(int varpId) {
+		if (varpId < 0) {
+			return Optional.of(false);
+		}
+		return clientThread.runOnClientThreadOptional(() -> isVarpIdInRange(client.getVarps(), varpId));
+	}
+
+	static boolean isVarpIdInRange(int[] varpValues, int varpId) {
+		return varpValues != null && varpId >= 0 && varpId < varpValues.length;
+	}
+
 	private @Varp int updateVarpValue(@Varp int varpId) {
 		return clientThread.runOnClientThreadOptional(() -> {
+			if (!isVarpIdInRange(client.getVarps(), varpId)) {
+				return 0;
+			}
 			int value = client.getVarpValue(varpId);
 			// Zero is a legitimate value and must be cached too — see updateVarbitValue.
 			if (client.getGameState() == GameState.LOGGED_IN) {

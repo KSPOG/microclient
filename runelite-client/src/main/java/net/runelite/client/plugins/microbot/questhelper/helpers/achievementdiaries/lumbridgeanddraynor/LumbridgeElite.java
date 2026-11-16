@@ -216,7 +216,7 @@ public class LumbridgeElite extends ComplexStateQuestHelper
 			"Chop some magic logs near the Magic Training Arena.", axe);
 
 		claimReward = new NpcStep(this, NpcID.MIKASI_LUMBRIDGE_DIARY, new WorldPoint(3235, 3213, 0),
-			"Talk to Hatius Cosaintus in Lumbridge to claim your reward!");
+			"Talk to Mikasi in Lumbridge to claim your reward!");
 		claimReward.addDialogStep("I have a question about my Achievement Diary.");
 	}
 

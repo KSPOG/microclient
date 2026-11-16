@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpExchange;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.walker.WalkerState;
 
@@ -62,27 +63,29 @@ public class WalkHandler extends AgentHandler {
 			return;
 		}
 
-		Number xNum = (Number) body.get("x");
-		Number yNum = (Number) body.get("y");
+		Integer xNum = getIntField(body, "x");
+		Integer yNum = getIntField(body, "y");
 		if (xNum == null || yNum == null) {
 			sendJson(exchange, 400, errorResponse("Missing required fields: x, y"));
 			return;
 		}
 
-		Number planeNum = (Number) body.get("plane");
+		Integer planeNum = getIntField(body, "plane");
 		int plane = planeNum != null ? planeNum.intValue() : 0;
 
-		boolean wait = Boolean.TRUE.equals(body.get("wait"));
+		boolean wait = Boolean.TRUE.equals(getBooleanField(body, "wait"));
 		int timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
-		if (body.get("timeout") instanceof Number) {
-			timeoutSeconds = ((Number) body.get("timeout")).intValue();
+		Integer timeoutNum = getIntField(body, "timeout");
+		if (timeoutNum != null) {
+			timeoutSeconds = timeoutNum;
 			if (timeoutSeconds <= 0) timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
 			if (timeoutSeconds > MAX_TIMEOUT_SECONDS) timeoutSeconds = MAX_TIMEOUT_SECONDS;
 		}
 
 		int reachedDistance = DEFAULT_REACHED_DISTANCE;
-		if (body.get("distance") instanceof Number) {
-			reachedDistance = ((Number) body.get("distance")).intValue();
+		Integer distanceNum = getIntField(body, "distance");
+		if (distanceNum != null) {
+			reachedDistance = distanceNum;
 			if (reachedDistance < 0) reachedDistance = DEFAULT_REACHED_DISTANCE;
 			if (reachedDistance > MAX_REACHED_DISTANCE) reachedDistance = MAX_REACHED_DISTANCE;
 		}
@@ -174,6 +177,9 @@ public class WalkHandler extends AgentHandler {
 			if (distanceToDestination >= 0) {
 				response.put("distanceToDestination", distanceToDestination);
 			}
+		}
+		if (!Boolean.TRUE.equals(response.get("success"))) {
+			response.put("route", PathHandler.serializeActive(Rs2PathApi.getActiveRouteStatus(), false));
 		}
 		addPlayerPosition(response);
 		sendJson(exchange, 200, response);

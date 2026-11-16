@@ -34,6 +34,7 @@ import javax.inject.Singleton;
 import java.util.Iterator;
 import java.util.Optional;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -46,6 +47,10 @@ public class ClientThread
 
 	protected ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
 	public Future<?> scheduledFuture;
+
+	private static final long TIMEOUT_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
+	private final AtomicLong lastTimeoutWarningNanos = new AtomicLong();
+	long clientThreadTimeoutMillis = 10000;
 
 	@Inject
 	private Client client;
@@ -70,8 +75,12 @@ public class ClientThread
 	 * @return
 	 * @param <T>
 	 */
-	@SneakyThrows
 	public <T> Optional<T> runOnClientThreadOptional(Callable<T> method) {
+		return runOnClientThreadOptional(method, clientThreadTimeoutMillis);
+	}
+
+	@SneakyThrows
+	public <T> Optional<T> runOnClientThreadOptional(Callable<T> method, long timeoutMillis) {
 		if (client.isClientThread()) {
 			try {
 				return Optional.ofNullable(method.call());
@@ -85,17 +94,32 @@ public class ClientThread
 		final FutureTask<T> task = new FutureTask<>(method);
 		invoke(task);
 		try {
-			return Optional.ofNullable(task.get(10000, TimeUnit.MILLISECONDS));
+			return Optional.ofNullable(task.get(timeoutMillis, TimeUnit.MILLISECONDS));
 		} catch (InterruptedException | TimeoutException | ExecutionException e) {
 			if (e instanceof InterruptedException) {
 				Thread.currentThread().interrupt();
 				return Optional.empty();
 			}			
-			task.cancel(true);
+			task.cancel(false);
+			if (e instanceof TimeoutException) {
+				logClientThreadTimeout(timeoutMillis);
+				return Optional.empty();
+			}
 			if (!Microbot.isDebug()) {
 				log.error("Exception during task execution: {}: {}\n{}", e.getClass().getSimpleName(), e.getMessage(),e);
 			}
 			return Optional.empty();
+		}
+	}
+
+	private void logClientThreadTimeout(long timeoutMillis) {
+		long now = System.nanoTime();
+		long last = lastTimeoutWarningNanos.get();
+		if ((last == 0 || now - last >= TIMEOUT_WARNING_INTERVAL_NANOS) && lastTimeoutWarningNanos.compareAndSet(last, now)) {
+			log.warn("Client thread did not run task within {}ms (caller thread {}); further timeouts suppressed for {}s",
+				timeoutMillis, Thread.currentThread().getName(), TimeUnit.NANOSECONDS.toSeconds(TIMEOUT_WARNING_INTERVAL_NANOS));
+		} else {
+			log.debug("Client thread did not run task within {}ms (caller thread {})", timeoutMillis, Thread.currentThread().getName());
 		}
 	}
 

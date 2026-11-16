@@ -17,6 +17,7 @@ import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 
+import java.awt.Rectangle;
 import java.util.List;
 import java.util.Map;
 
@@ -41,7 +42,8 @@ public class Rs2Combat {
 //        if (isSelected(widget.getId() + 1)) {
 //            return true;
 //        }
-        log("Setting attack style to " + Rs2Widget.getWidget(widget.getId() + 3).getText());
+        Widget label = Rs2Widget.getWidget(widget.getId() + 3);
+        log("Setting attack style to " + (label != null ? label.getText() : style.name()));
         Rs2Widget.clickWidget(widget);
         return true;
     }
@@ -110,11 +112,16 @@ public class Rs2Combat {
         int currentSpecEnergy = Microbot.getClientThread().runOnClientThreadOptional(
                 () -> Microbot.getClient().getVarpValue(VarPlayer.SPECIAL_ATTACK_PERCENT)
         ).orElse(0);
-        if (Rs2Widget.isHidden(10485795)) return false;
+        Rectangle specBounds = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Widget widget = Microbot.getClient().getWidget(10485795);
+            if (widget == null || widget.isHidden()) return null;
+            return widget.getBounds();
+        }).orElse(null);
+        if (specBounds == null) return false;
         if (currentSpecEnergy < specialAttackEnergyRequired) return false;
         if (state == getSpecState()) return true;
 
-        Microbot.getMouse().click(Rs2Widget.getWidget(10485795).getBounds());
+        Microbot.getMouse().click(specBounds);
 
         log("Used special attack");
 
@@ -232,14 +239,20 @@ public class Rs2Combat {
      * <p>
      * It looks up the weapon-styles enum to map varbit indices to style names.
      *
-     * @return the human-readable attack style name (e.g., "Slash", "Magic")
+     * @return the human-readable attack style name (e.g., "Slash", "Magic"), or {@code null} if it cannot be resolved
      */
     public static String getWeaponAttackStyle() {
         final int attackStyleVarbit = Microbot.getVarbitPlayerValue(VarPlayerID.COM_MODE);
         final int weaponTypeVarbit = Microbot.getVarbitValue(VarbitID.COMBAT_WEAPON_CATEGORY);
-        int weaponStyleEnum = Microbot.getEnum(EnumID.WEAPON_STYLES).getIntValue(weaponTypeVarbit);
-        int[] weaponStyleStructs = Microbot.getEnum(weaponStyleEnum).getIntVals();
+        EnumComposition weaponStyles = Microbot.getEnum(EnumID.WEAPON_STYLES);
+        if (weaponStyles == null) return null;
+        int weaponStyleEnum = weaponStyles.getIntValue(weaponTypeVarbit);
+        if (weaponStyleEnum == -1) return null;
+        EnumComposition weaponStyleComposition = Microbot.getEnum(weaponStyleEnum);
+        if (weaponStyleComposition == null) return null;
+        int[] weaponStyleStructs = weaponStyleComposition.getIntVals();
+        if (weaponStyleStructs == null || attackStyleVarbit < 0 || attackStyleVarbit >= weaponStyleStructs.length) return null;
         StructComposition attackStylesStruct = Microbot.getStructComposition(weaponStyleStructs[attackStyleVarbit]);
-        return attackStylesStruct.getStringValue(ParamID.ATTACK_STYLE_NAME);
+        return attackStylesStruct == null ? null : attackStylesStruct.getStringValue(ParamID.ATTACK_STYLE_NAME);
     }
 }

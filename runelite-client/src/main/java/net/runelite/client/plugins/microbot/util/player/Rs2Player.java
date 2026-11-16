@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.util.player;
 
 import lombok.Getter;
 import net.runelite.api.*;
+import net.runelite.api.Point;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
@@ -13,12 +14,14 @@ import net.runelite.api.kit.KitType;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetInfo;
 import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.accountselector.AutoLoginSuppressionRequest;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.api.boat.Rs2BoatCache;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.api.playerstate.Rs2PlayerStateCache;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.api.tileobject.models.TileObjectType;
 import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
@@ -42,6 +45,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,7 +72,7 @@ public class Rs2Player {
     public static int moonlightTime = -1;
     public static Instant lastAnimationTime = null;
     private static final long COMBAT_TIMEOUT_MS = 10000;
-    private static long lastCombatTime = 0;
+    private static volatile long lastCombatTime = 0;
     @Getter
     public static int lastAnimationID = AnimationID.IDLE;
 
@@ -408,27 +413,56 @@ public class Rs2Player {
         return false;
     }
 
+    private static final ReentrantLock RUN_TOGGLE_LOCK = new ReentrantLock();
+    private static final long RUN_TOGGLE_RETRY_NANOS = TimeUnit.MILLISECONDS.toNanos(1200);
+    private static long lastRunToggleAttempt;
+    private static boolean runToggleAttempted;
+
     /**
-     * Toggles the player's run energy on or off.
+     * Requests the desired run state. Enabling requires energy strictly above
+     * {@link Microbot#runEnergyThreshold} (hundredths of a percent; default 1000 = 10%).
+     * Disabling and an already satisfied state do not require energy.
      *
-     * @param toggle {@code true} to enable running, {@code false} to disable it.
-     * @return {@code true} if the toggle action was performed successfully or was already in the desired state,
-     *         {@code false} if the run energy toggle widget was not found.
+     * @return true only when the desired state is observed; false includes a pending click,
+     *         insufficient energy, unavailable orb, retry cooldown, or a client-thread request
+     *         that would require a mouse gesture. Call again from the normal script loop.
      */
     public static boolean toggleRunEnergy(boolean toggle) {
-        if (Microbot.getVarbitPlayerValue(173) == 0 && !toggle) return true;
-        if (Microbot.getVarbitPlayerValue(173) == 1 && toggle) return true;
-
-        Widget widget = Rs2Widget.getWidget(WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
-        if (widget == null || widget.isHidden()) return false;
-
-        Rectangle bounds = widget.getBounds();
-        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) return false;
-
-        Microbot.getMouse().click(bounds);
-        sleep(150, 300);
-
-        return true;
+        if (Thread.currentThread().isInterrupted() || !RUN_TOGGLE_LOCK.tryLock()) return false;
+        try {
+            Boolean satisfied = Microbot.getClientThread().runOnClientThreadOptional(() ->
+                    Microbot.getClient().getGameState() == GameState.LOGGED_IN
+                            && (Microbot.getClient().getVarpValue(173) == 1) == toggle).orElse(false);
+            if (satisfied) return true;
+            if (Microbot.getClientThread().isClientThread()) return false;
+            if (runToggleAttempted && System.nanoTime() - lastRunToggleAttempt < RUN_TOGGLE_RETRY_NANOS) {
+                return false;
+            }
+            Point target = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                Client client = Microbot.getClient();
+                if (client.getGameState() != GameState.LOGGED_IN
+                        || (client.getVarpValue(173) == 1) == toggle
+                        || (toggle && client.getEnergy() <= Math.max(0, Microbot.runEnergyThreshold))) return null;
+                Widget widget = Rs2Widget.getWidget(WidgetInfo.MINIMAP_TOGGLE_RUN_ORB.getId());
+                if (widget == null || widget.isHidden()) return null;
+                Rectangle bounds = widget.getBounds();
+                if (bounds == null || bounds.width < 3 || bounds.height < 3 || bounds.x < 0 || bounds.y < 0
+                        || !Rs2UiHelper.isRectangleWithinCanvas(bounds)) return null;
+                return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+            }).orElse(null);
+            if (target == null) return false;
+            try {
+                Microbot.getMouse().click(target);
+            } finally {
+                lastRunToggleAttempt = System.nanoTime();
+                runToggleAttempted = true;
+            }
+            return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                    Microbot.getClient().getGameState() == GameState.LOGGED_IN
+                            && (Microbot.getClient().getVarpValue(173) == 1) == toggle).orElse(false);
+        } finally {
+            RUN_TOGGLE_LOCK.unlock();
+        }
     }
 
     /**
@@ -440,11 +474,45 @@ public class Rs2Player {
         return Microbot.getVarbitPlayerValue(173) == 1;
     }
 
+    public enum TerminalLogoutState { BANK_CLOSING, LOGOUT_REQUESTED, LOGGED_OUT, INPUT_BLOCKED }
+
+    private static TerminalLogoutState terminalLogoutInputStep() {
+        if (!Microbot.isLoggedIn()) return TerminalLogoutState.LOGGED_OUT;
+        if (Rs2Bank.isOpen()) {
+            return Rs2Widget.clickChildWidget(786434, 11)
+                    ? TerminalLogoutState.BANK_CLOSING : TerminalLogoutState.INPUT_BLOCKED;
+        }
+        logout();
+        return TerminalLogoutState.LOGOUT_REQUESTED;
+    }
+
+    /**
+     * Best-effort terminal logout after a confirmed supply failure, off the client thread.
+     * Pending suppression expires after 15 seconds if logout never completes. Resume by manually logging in
+     * after the logout, starting another script, or restarting AutoLogin.
+     * The return value distinguishes requested input from observed logout completion.
+     */
+    public static TerminalLogoutState logoutWithoutAutoLogin() {
+        if (Microbot.getClient().isClientThread()) return TerminalLogoutState.INPUT_BLOCKED;
+        // Post once: a newer script start during bank closure must not be re-blocked.
+        Microbot.getEventBus().post(new AutoLoginSuppressionRequest());
+        TerminalLogoutState state = terminalLogoutInputStep();
+        if (state == TerminalLogoutState.BANK_CLOSING) {
+            if (!sleepUntil(() -> !Rs2Bank.isOpen(), 2400)) return state;
+            state = terminalLogoutInputStep();
+        }
+        if (state == TerminalLogoutState.LOGOUT_REQUESTED
+                && sleepUntil(() -> !Microbot.isLoggedIn(), 5000)) return TerminalLogoutState.LOGGED_OUT;
+        return state;
+    }
+
     /**
      * Logs the player out of the game
      */
     public static void logout() {
         if (!Microbot.isLoggedIn()) return;
+
+        Microbot.getEventBus().post(new LogoutRequested());
 
         // Make sure jagex acount does not auto login
         Rs2Keyboard.resetEnter();
@@ -701,16 +769,21 @@ public class Rs2Player {
      */
     @Deprecated(since = "2.1.0 - Use Rs2PlayerCache/Rs2PlayerQueryable", forRemoval = true)
     public static Stream<Rs2PlayerModel> getPlayers(Predicate<Rs2PlayerModel> predicate, boolean includeLocalPlayer) {
-        List<Rs2PlayerModel> players = Optional.of(Microbot.getClient().getTopLevelWorldView().players()
-                        .stream()
-                        .filter(Objects::nonNull)
-                        .map(Rs2PlayerModel::new)
-                        .filter(x -> includeLocalPlayer || x.getPlayer() != Microbot.getClient().getLocalPlayer())
-                        .filter(predicate)
-                        .collect(Collectors.toList())
-        ).orElse(new ArrayList<>());
+        List<Rs2PlayerModel> players = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            WorldView worldView = Microbot.getClient().getTopLevelWorldView();
+            if (worldView == null) {
+                return Collections.<Rs2PlayerModel>emptyList();
+            }
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            return worldView.players()
+                    .stream()
+                    .filter(Objects::nonNull)
+                    .filter(x -> includeLocalPlayer || x != localPlayer)
+                    .map(Rs2PlayerModel::new)
+                    .collect(Collectors.toList());
+        }).orElse(Collections.emptyList());
 
-        return players.stream();
+        return players.stream().filter(predicate);
     }
 
     /**
@@ -882,9 +955,10 @@ public class Rs2Player {
      * @return The combat level of the local player.
      */
     public static int getCombatLevel() {
-        return Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getClient().getLocalPlayer().getCombatLevel()
-        ).orElse(0);
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            return localPlayer == null ? null : localPlayer.getCombatLevel();
+        }).orElse(0);
     }
 
     /**
@@ -905,7 +979,10 @@ public class Rs2Player {
      * @return The local player wrapped in an {@link Rs2PlayerModel}.
      */
     public static Rs2PlayerModel getLocalPlayer() {
-        return getPlayers(player -> player.getId() == Microbot.getClient().getLocalPlayer().getId(), true).findFirst().orElse(null);
+        return getPlayers(player -> {
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            return localPlayer != null && player.getId() == localPlayer.getId();
+        }, true).findFirst().orElse(null);
     }
 
     /**
@@ -968,11 +1045,15 @@ public class Rs2Player {
 	 */
 	public static WorldPoint getWorldLocation_Internal(){
 		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			Player player = Microbot.getClient().getLocalPlayer();
+			if (player == null) return null;
 			if (Microbot.getClient().getTopLevelWorldView().getScene().isInstance()) {
-				LocalPoint l = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), Microbot.getClient().getLocalPlayer().getWorldLocation());
+				LocalPoint l = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), player.getWorldLocation());
+				if (l == null) l = player.getLocalLocation();
+				if (l == null) return player.getWorldLocation();
 				return WorldPoint.fromLocalInstance(Microbot.getClient(), l);
 			}
-			return Microbot.getClient().getLocalPlayer().getWorldLocation();
+			return player.getWorldLocation();
 		}).orElse(null);
 	}
 
@@ -1132,7 +1213,8 @@ public class Rs2Player {
      * @return The {@link LocalPoint} representing the player's current position.
      */
     public static LocalPoint getLocalLocation() {
-        return Microbot.getClient().getLocalPlayer().getLocalLocation();
+        Player localPlayer = Microbot.getClient().getLocalPlayer();
+        return localPlayer == null ? null : localPlayer.getLocalLocation();
     }
 
     /**
@@ -1464,7 +1546,11 @@ public class Rs2Player {
      */
     public static boolean isStandingOnGameObject() {
         WorldPoint playerPoint = getWorldLocation();
-        return Rs2GameObject.getGameObject(o -> Objects.equals(playerPoint, o.getWorldLocation())) != null || isStandingOnGroundItem();
+        return Microbot.getRs2TileObjectCache().query()
+                .fromWorldView()
+                .ofType(TileObjectType.GAME)
+                .where(o -> Objects.equals(playerPoint, o.getRuneLiteWorldLocation()))
+                .firstOnClientThread() != null || isStandingOnGroundItem();
     }
 
     /**
@@ -1495,9 +1581,10 @@ public class Rs2Player {
      * @return The pose animation ID of the player.
      */
     public static int getPoseAnimation() {
-        return Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getClient().getLocalPlayer().getPoseAnimation()
-        ).orElse(-1);
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Player localPlayer = Microbot.getClient().getLocalPlayer();
+            return localPlayer == null ? null : localPlayer.getPoseAnimation();
+        }).orElse(-1);
     }
 
     /**
@@ -1631,12 +1718,13 @@ public class Rs2Player {
      * @return {@code true} if the player's idle time exceeds or equals the adjusted timeout, {@code false} otherwise.
      */
     public static boolean checkIdleLogout(long randomDelay) {
-        long idleClientTicks = Long.min(
-                Microbot.getClient().getMouseIdleTicks(),
-                Microbot.getClient().getKeyboardIdleTicks()
-        );
-
-        return idleClientTicks >= Microbot.getClient().getIdleTimeout() - randomDelay;
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            long idleClientTicks = Long.min(
+                    Microbot.getClient().getMouseIdleTicks(),
+                    Microbot.getClient().getKeyboardIdleTicks()
+            );
+            return idleClientTicks >= Microbot.getClient().getIdleTimeout() - randomDelay;
+        }).orElse(false);
     }
 
     /**
@@ -1648,7 +1736,9 @@ public class Rs2Player {
      * @return {@code true} if the player is inside a cave, {@code false} otherwise.
      */
     public static boolean isInCave() {
-        return Rs2Player.getWorldLocation().getY() >= 6400
+        WorldPoint location = Rs2Player.getWorldLocation();
+        return location != null
+                && location.getY() >= 6400
                 && !Microbot.getClient().getTopLevelWorldView().isInstance();
     }
     
@@ -1694,7 +1784,8 @@ public class Rs2Player {
      * @return The graphic ID of the local player.
      */
     public static int getGraphicId() {
-        return Microbot.getClient().getLocalPlayer().getGraphic();
+        Player localPlayer = Microbot.getClient().getLocalPlayer();
+        return localPlayer == null ? -1 : localPlayer.getGraphic();
     }
 
     /**
@@ -1707,7 +1798,8 @@ public class Rs2Player {
      * @return {@code true} if the local player has the specified spot animation, {@code false} otherwise.
      */
     public static boolean hasSpotAnimation(int graphicId) {
-        return Microbot.getClient().getLocalPlayer().hasSpotAnim(graphicId);
+        Player localPlayer = Microbot.getClient().getLocalPlayer();
+        return localPlayer != null && localPlayer.hasSpotAnim(graphicId);
     }
 
     /**
@@ -1887,4 +1979,25 @@ public class Rs2Player {
     public static boolean hasCompletedTutorialIsland() {
         return Microbot.getVarbitPlayerValue(281) >= 1000;
     }
+
+    /** One off-client-thread terminal logout step with AutoLogin suppression. */
+    public static TerminalLogoutState logoutWithoutAutoLoginStep() {
+        return logoutWithoutAutoLoginStep(() -> Microbot.getEventBus().post(new AutoLoginSuppressionRequest()));
+    }
+
+    static TerminalLogoutState logoutWithoutAutoLoginStep(Runnable requestSuppression) {
+        if (Microbot.getClientThread().isClientThread()) return TerminalLogoutState.INPUT_BLOCKED;
+        GameState state = Microbot.getClientThread().runOnClientThreadOptional(
+                () -> Microbot.getClient().getGameState()).orElse(GameState.UNKNOWN);
+        if (state != GameState.LOGGED_IN && state != GameState.LOGIN_SCREEN) return TerminalLogoutState.INPUT_BLOCKED;
+        if (state == GameState.LOGIN_SCREEN) return TerminalLogoutState.LOGGED_OUT;
+        requestSuppression.run();
+        if (Rs2Bank.isOpen()) {
+            return Rs2Widget.clickChildWidget(786434, 11)
+                    ? TerminalLogoutState.BANK_CLOSING : TerminalLogoutState.INPUT_BLOCKED;
+        }
+        logout();
+        return TerminalLogoutState.LOGOUT_REQUESTED;
+    }
+
 }

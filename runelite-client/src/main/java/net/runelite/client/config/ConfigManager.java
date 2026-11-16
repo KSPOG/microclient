@@ -29,6 +29,7 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Strings;
 import com.google.common.collect.ComparisonChain;
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -68,9 +69,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Singleton
@@ -90,6 +93,10 @@ public class ConfigManager
 	private static final int KEY_SPLITTER_PROFILE = 1;
 	private static final int KEY_SPLITTER_KEY = 2;
 
+	static final String REDACTED = "<redacted>";
+	private static final Pattern KEY_SEGMENT_SPLITTER = Pattern.compile("(?<=[a-z0-9])(?=[A-Z])|[^A-Za-z0-9]+");
+	private static final String[] SECRET_KEY_FRAGMENTS = {"password", "token", "secret", "apikey", "webhook"};
+
 	@Nullable
 	@Getter
 	private static String configProfileName;
@@ -106,6 +113,9 @@ public class ConfigManager
 
 	@Getter
 	private ConfigProfile profile;
+	@Getter
+	@Nullable
+	private Long startupProfileId;
 	private ConfigProfile rsProfile;
 	private ConfigData configProfile;
 	private ConfigData rsProfileConfigProfile;
@@ -115,6 +125,7 @@ public class ConfigManager
 	private String rsProfileKey;
 
 	private final Map<Type, Serializer<?>> serializers = Collections.synchronizedMap(new WeakHashMap<>());
+	private final Set<String> secretKeys = ConcurrentHashMap.newKeySet();
 
 	@Inject
 	ConfigInventorySetupDataManager configInventorySetupDataManager;
@@ -156,7 +167,7 @@ public class ConfigManager
 		// Ensure existing config is saved
 		sendConfig();
 
-		log.info("Switching profile to: {} ({})", newProfile.getName(), newProfile.getId());
+		log.info("Switching profile to: {}", newProfile.getId());
 
 		// sync the latest config revision from the server
 		if (sessionManager.getAccountSession() != null && newProfile.isSync())
@@ -215,7 +226,10 @@ public class ConfigManager
 				continue;
 			}
 
-			log.debug("Loading configuration value {}: {}", wholeKey, newValue);
+			if (log.isDebugEnabled())
+			{
+				log.debug("Loading configuration value {}: {}", wholeKey, redactForLog(secretKeys, groupName, key, newValue));
+			}
 
 			ConfigChanged configChanged = new ConfigChanged();
 			configChanged.setGroup(groupName);
@@ -277,7 +291,7 @@ public class ConfigManager
 
 			if (profile.isSync())
 			{
-				log.info("Active remote profile '{}' lost due to session close, converting to a local profile.", profile.getName());
+				log.info("Active remote profile {} lost due to session close, converting to a local profile.", profile.getId());
 				profile.setSync(false);
 				profile.setRev(-1L);
 			}
@@ -656,7 +670,7 @@ public class ConfigManager
 					continue;
 				}
 
-				log.info("Profile '{}' (sync: {}, active: {}, id: {})", p.getName(), p.isSync(), p.isActive(), p.getId());
+				log.info("Profile {} (sync: {}, active: {})", p.getId(), p.isSync(), p.isActive());
 			}
 
 			if (rsProfile == null)
@@ -728,7 +742,7 @@ public class ConfigManager
 
 			if (profile != null)
 			{
-				log.info("Using profile: {} ({})", profile.getName(), profile.getId());
+				log.info("Using profile: {}", profile.getId());
 			}
 			else
 			{
@@ -740,13 +754,14 @@ public class ConfigManager
 					profile.setActive(true);
 				}
 
-				log.info("Creating profile: {} ({})", profile.getName(), profile.getId());
+				log.info("Creating profile: {}", profile.getId());
 			}
 
 			// synced profautoogile need to be fetched if outdated
 			syncRemote(lock, profile, remoteProfiles);
 
 			this.profile = profile;
+			startupProfileId = profile.getId();
 			configProfile = new ConfigData(ProfileManager.profileConfigFile(profile));
 		}
 
@@ -780,7 +795,7 @@ public class ConfigManager
 
 				if (migrating && remoteProfile.getId() == 0L)
 				{
-					log.info("Using remote profile {} as the active profile", profile.getName());
+					log.info("Using remote profile {} as the active profile", profile.getId());
 					profile.setActive(true);
 				}
 			}
@@ -803,7 +818,7 @@ public class ConfigManager
 					continue;
 				}
 
-				log.warn("Lost remote profile for '{}'", localProfile.getName());
+				log.warn("Lost remote profile for {}", localProfile.getId());
 				// convert the profile to a non-synced profile
 				localProfile.setSync(false);
 				localProfile.setRev(-1);
@@ -837,11 +852,11 @@ public class ConfigManager
 
 		if (profile.getRev() == remoteProfile.getRev())
 		{
-			log.info("Profile '{}' is up to date", profile.getName());
+			log.info("Profile {} is up to date", profile.getId());
 		}
 		else
 		{
-			log.info("Loading remote configuration for profile '{}'", profile.getName());
+			log.info("Loading remote configuration for profile {}", profile.getId());
 
 			try
 			{
@@ -1006,7 +1021,10 @@ public class ConfigManager
 			return;
 		}
 
-		log.debug("Setting configuration value for {} to {}", wholeKey, value);
+		if (log.isDebugEnabled())
+		{
+			log.debug("Setting configuration value for {} to {}", wholeKey, redactForLog(secretKeys, groupName, key, value));
+		}
 		handler.invalidate();
 
 		ConfigChanged configChanged = new ConfigChanged();
@@ -1188,6 +1206,8 @@ public class ConfigManager
 				.result())
 			.collect(Collectors.toList());
 
+		items.forEach(i -> registerSecret(group.value(), i.getItem()));
+
 		ConfigInformation information = inter.getAnnotation(ConfigInformation.class);
 
 		return new ConfigDescriptor(group, sections, items, information);
@@ -1217,6 +1237,8 @@ public class ConfigManager
 			{
 				continue;
 			}
+
+			registerSecret(group.value(), item);
 
 			if (!method.isDefault())
 			{
@@ -1259,7 +1281,7 @@ public class ConfigManager
 			// null and the empty string are treated identically in sendConfig and treated as an unset
 			// If a config value defaults to "" and the current value is null, it will cause an extra
 			// unset to be sent, so treat them as equal
-			boolean isInventorySetup = item.keyName().toLowerCase().contains("inventorysetup");
+			boolean isInventorySetup = method.getReturnType() == InventorySetup.class;
 			if (Objects.equals(current, valueString) || (Strings.isNullOrEmpty(current) && Strings.isNullOrEmpty(valueString)))
 			{
 				if (isInventorySetup) {
@@ -1274,15 +1296,25 @@ public class ConfigManager
 			if (current != null && !current.isBlank()) {
 				if (isInventorySetup) {
 					var setups = configInventorySetupDataManager.loadV3Setups(this);
-					InventorySetup currentObj = gson.fromJson(current, InventorySetup.class);
+					InventorySetup currentObj;
+					try {
+						currentObj = gson.fromJson(current, InventorySetup.class);
+					} catch (JsonParseException | IllegalStateException e) {
+						log.debug("Unable to parse inventory setup for {}.{}", group.value(), item.keyName(), e);
+						currentObj = null;
+					}
+					String currentName = currentObj == null ? null : currentObj.getName();
 					if (!setups.isEmpty() && setups.stream()
-							.noneMatch(x -> x.getName().equalsIgnoreCase(currentObj.getName()))) {
+							.noneMatch(x -> x.getName().equalsIgnoreCase(currentName))) {
 						setConfiguration(group.value(), item.keyName(), "");
 					}
 				}
 			}
 
-			log.debug("Setting default configuration value for {}.{} to {}", group.value(), item.keyName(), defaultValue);
+			if (log.isDebugEnabled())
+			{
+				log.debug("Setting default configuration value for {}.{} to {}", group.value(), item.keyName(), redactForLog(secretKeys, group.value(), item.keyName(), defaultValue));
+			}
 
 			if (Strings.isNullOrEmpty(valueString))
 			{
@@ -1517,7 +1549,7 @@ public class ConfigManager
 		ConfigProfile p = lock.findProfile(profile.getId());
 		if (p == null)
 		{
-			log.warn("Lost active profile {}!", profile.getName());
+			log.warn("Lost active profile {}!", profile.getId());
 
 			// We just recreate it, with the same id, so that the ConfigData stays valid
 			p = lock.createProfile(profile.getName(), profile.getId());
@@ -1772,6 +1804,55 @@ public class ConfigManager
 	 */
 	@VisibleForTesting
 	@Nullable
+	private void registerSecret(String groupName, ConfigItem item)
+	{
+		if (item.secret())
+		{
+			secretKeys.add(groupName + "." + item.keyName());
+		}
+	}
+
+	static Object redactForLog(Set<String> secretKeys, String groupName, String key, Object value)
+	{
+		return value != null && isSecretKey(secretKeys, groupName, key) ? REDACTED : value;
+	}
+
+	static boolean isSecretKey(Set<String> secretKeys, String groupName, String key)
+	{
+		if (key == null)
+		{
+			return false;
+		}
+
+		if (secretKeys.contains(groupName + "." + key))
+		{
+			return true;
+		}
+
+		String normalized = key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
+		for (String fragment : SECRET_KEY_FRAGMENTS)
+		{
+			if (normalized.contains(fragment))
+			{
+				return true;
+			}
+		}
+
+		if (normalized.endsWith("pin"))
+		{
+			return true;
+		}
+
+		for (String segment : KEY_SEGMENT_SPLITTER.split(key))
+		{
+			if (segment.equalsIgnoreCase("pin") || segment.equalsIgnoreCase("pins"))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	static String[] splitKey(String key)
 	{
 		int i = key.indexOf('.');

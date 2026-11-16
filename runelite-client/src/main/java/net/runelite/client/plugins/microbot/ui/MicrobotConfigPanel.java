@@ -35,16 +35,15 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ExternalPluginsChanged;
 import net.runelite.client.events.PluginChanged;
 import net.runelite.client.events.ProfileChanged;
-import net.runelite.client.externalplugins.ExternalPluginManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.plugins.microbot.AlwaysOnPlugins;
 import net.runelite.client.plugins.microbot.MicrobotConfigManager;
 import net.runelite.client.plugins.microbot.breakhandler.breakhandlerv2.BreakHandlerV2Config;
 import net.runelite.client.plugins.microbot.breakhandler.breakhandlerv2.PluginStopHelper;
 import net.runelite.client.plugins.microbot.breakhandler.breakhandlerv2.PluginStopOption;
 import net.runelite.client.plugins.microbot.inventorysetups.InventorySetup;
 import net.runelite.client.plugins.microbot.inventorysetups.MInventorySetupsPlugin;
-import net.runelite.client.plugins.microbot.mouserecorder.MouseMacroRecorderPlugin;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.DynamicGridLayout;
 import net.runelite.client.ui.FontManager;
@@ -81,6 +80,8 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
     private static final ImageIcon SECTION_RETRACT_ICON;
     static final ImageIcon CONFIG_ICON;
     static final ImageIcon BACK_ICON;
+    static final ImageIcon REPORT_ICON = new ImageIcon(ImageUtil.grayscaleImage(MicrobotHelpMenu.bugIcon()));
+    static final ImageIcon REPORT_HOVER_ICON = new ImageIcon(MicrobotHelpMenu.bugIcon());
 
     private static final Map<ConfigSectionDescriptor, Boolean> sectionExpandStates = new HashMap<>();
 
@@ -100,15 +101,16 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
     private final MicrobotPluginListPanel pluginList;
     private final ConfigManager configManager;
     private final PluginManager pluginManager;
-    private final ExternalPluginManager externalPluginManager;
     private final ColorPickerManager colorPickerManager;
     private final Provider<MicrobotNotificationPanel> notificationPanelProvider;
+    private final MicrobotBugReporter bugReporter;
 
     private final TitleCaseListCellRenderer listCellRenderer = new TitleCaseListCellRenderer();
 
     private final MicrobotFixedWidthPanel mainPanel;
     private final JLabel title;
     private final MicrobotPluginToggleButton pluginToggle;
+    private final JButton reportButton;
 
     private MicrobotPluginConfigurationDescriptor pluginConfig = null;
     // add near other fields
@@ -122,18 +124,18 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
             MicrobotPluginListPanel pluginList,
             ConfigManager configManager,
             PluginManager pluginManager,
-            ExternalPluginManager externalPluginManager,
             ColorPickerManager colorPickerManager,
-            Provider<MicrobotNotificationPanel> notificationPanelProvider
+            Provider<MicrobotNotificationPanel> notificationPanelProvider,
+            MicrobotBugReporter bugReporter
     ) {
         super(false);
 
         this.pluginList = pluginList;
         this.configManager = configManager;
         this.pluginManager = pluginManager;
-        this.externalPluginManager = externalPluginManager;
         this.colorPickerManager = colorPickerManager;
         this.notificationPanelProvider = notificationPanelProvider;
+        this.bugReporter = bugReporter;
 
         setLayout(new BorderLayout());
         setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -171,7 +173,16 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
 
         header.add(backBtn, BorderLayout.WEST);
         header.add(title, BorderLayout.CENTER);
-        header.add(pluginToggle, BorderLayout.EAST);
+        reportButton = new JButton(REPORT_ICON);
+        SwingUtil.removeButtonDecorations(reportButton);
+        reportButton.setRolloverIcon(REPORT_HOVER_ICON);
+        reportButton.setPreferredSize(new Dimension(22, 0));
+        reportButton.setToolTipText("Report a problem with this plugin");
+        reportButton.setVisible(false);
+        JPanel headerActions = new JPanel(new BorderLayout(8, 0));
+        headerActions.add(reportButton, BorderLayout.WEST);
+        headerActions.add(pluginToggle, BorderLayout.EAST);
+        header.add(headerActions, BorderLayout.EAST);
         topPanel.add(header, BorderLayout.NORTH);
 
         // --- search field ---
@@ -244,14 +255,20 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
         JMenuItem uninstallItem = null;
         if (iname != null) {
             uninstallItem = new JMenuItem("Uninstall");
-            uninstallItem.addActionListener(ev -> externalPluginManager.remove(iname));
+            uninstallItem.addActionListener(ev -> pluginList.uninstall(pluginConfig));
         }
 
-        MicrobotPluginListItem.addLabelPopupMenu(title, pluginConfig.createSupportMenuItem(pluginConfig.getPlugin()), uninstallItem);
+        MicrobotPluginListItem.addLabelPopupMenu(title, pluginConfig.createSupportMenuItem(pluginConfig.getPlugin()),
+                bugReporter.menuItem(this, pluginConfig.getPlugin()), uninstallItem);
+        if (pluginConfig.getPlugin() != null) {
+            reportButton.addActionListener(e -> bugReporter.open(this, pluginConfig.getPlugin()));
+            reportButton.setVisible(true);
+        }
 
         if (pluginConfig.getPlugin() != null) {
             pluginToggle.setConflicts(pluginConfig.getConflicts());
             pluginToggle.setSelected(pluginManager.isPluginEnabled(pluginConfig.getPlugin()));
+            applyAlwaysOnLock();
             pluginToggle.addItemListener(i ->
             {
                 if (pluginToggle.isSelected()) {
@@ -418,10 +435,10 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
 
             if (result == JOptionPane.YES_OPTION) {
                 configManager.setDefaultConfiguration(pluginConfig.getConfig(), true);
-                MicrobotConfigManager.resetProfilePluginProperties(pluginConfig.getPlugin().getClass());
                 // Reset non-config panel keys
                 Plugin plugin = pluginConfig.getPlugin();
                 if (plugin != null) {
+                    MicrobotConfigManager.resetProfilePluginProperties(plugin.getClass());
                     plugin.resetConfiguration();
                 }
 
@@ -663,12 +680,16 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
 // in config as a JSON string.
 // ---------------------------------------------------------------------------
     private JComboBox<InventorySetup> createInventorySetupsComboBox(ConfigDescriptor cd, ConfigItemDescriptor cid) {
-        // Suppose MInventorySetupsPlugin.getInventorySetups() returns a List<InventorySetup>
-        List<InventorySetup> setups = MInventorySetupsPlugin.getInventorySetups();
+        return createInventorySetupsComboBox(configManager, cd.getGroup().value(), cid.getItem().keyName(), MInventorySetupsPlugin.getInventorySetups());
+    }
+
+    static JComboBox<InventorySetup> createInventorySetupsComboBox(ConfigManager configManager, String group, String key, List<InventorySetup> setups) {
+        if (setups == null) {
+            return new JComboBox<>();
+        }
         if (setups.isEmpty()) {
             // If there are no setups, return an empty combo box
-            configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), "");
-            configManager.sendConfig();
+            configManager.setConfiguration(group, key, "");
             return new JComboBox<>();
         }
         JComboBox<InventorySetup> box = new JComboBox<>(new DefaultComboBoxModel<>(setups.toArray(new InventorySetup[0])));
@@ -687,11 +708,10 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
         });
 
         // 1) Retrieve dezerialized InventorySetup from config
-        InventorySetup dezerialized = configManager.getConfiguration(cd.getGroup().value(), cid.getItem().keyName(), InventorySetup.class);
+        InventorySetup dezerialized = configManager.getConfiguration(group, key, InventorySetup.class);
         if (dezerialized == null) {
             dezerialized = setups.get(0);
-            configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), dezerialized);
-            configManager.sendConfig();
+            configManager.setConfiguration(group, key, dezerialized);
         }
         for (InventorySetup setup : setups) {
             if (setup.getName().equals(dezerialized.getName())) {
@@ -706,7 +726,7 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
             if (e.getStateChange() == ItemEvent.SELECTED) {
                 InventorySetup chosen = (InventorySetup) box.getSelectedItem();
                 if (chosen != null) {
-                    configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), chosen);
+                    configManager.setConfiguration(group, key, chosen);
                 }
             }
         });
@@ -829,10 +849,6 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
         button.addActionListener(e -> {
             ConfigButton next = new ConfigButton(UUID.randomUUID().toString());
             configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), next);
-            if (MouseMacroRecorderPlugin.CONFIG_GROUP.equals(cd.getGroup().value())
-                    && "openRecordingsFolder".equals(cid.getItem().keyName())) {
-                MouseMacroRecorderPlugin.openRecordingsFolderStatic();
-            }
         });
         return button;
     }
@@ -854,6 +870,8 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
         if (component instanceof JCheckBox) {
             JCheckBox checkbox = (JCheckBox) component;
             configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), "" + checkbox.isSelected());
+            checkbox.setSelected(Boolean.parseBoolean(
+                    configManager.getConfiguration(cd.getGroup().value(), cid.getItem().keyName())));
         } else if (component instanceof JSpinner) {
             JSpinner spinner = (JSpinner) component;
             configManager.setConfiguration(cd.getGroup().value(), cid.getItem().keyName(), "" + spinner.getValue());
@@ -891,7 +909,17 @@ class MicrobotConfigPanel extends MicrobotPluginPanel {
     public void onPluginChanged(PluginChanged event) {
         if (event.getPlugin() == this.pluginConfig.getPlugin()) {
             SwingUtilities.invokeLater(() ->
-                    pluginToggle.setSelected(event.isLoaded()));
+            {
+                pluginToggle.setSelected(event.isLoaded());
+                applyAlwaysOnLock();
+            });
+        }
+    }
+
+    private void applyAlwaysOnLock() {
+        if (pluginManager.isPluginAlwaysOn(pluginConfig.getPlugin())) {
+            pluginToggle.setEnabled(false);
+            pluginToggle.setToolTipText(AlwaysOnPlugins.TOOLTIP);
         }
     }
 

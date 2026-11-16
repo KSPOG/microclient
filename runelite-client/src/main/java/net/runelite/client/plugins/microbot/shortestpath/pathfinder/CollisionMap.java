@@ -1,7 +1,6 @@
 package net.runelite.client.plugins.microbot.shortestpath.pathfinder;
 
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.TileObject;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.shortestpath.Transport;
 import net.runelite.client.plugins.microbot.shortestpath.TransportType;
@@ -9,13 +8,31 @@ import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCol
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveEdgeSource;
 import net.runelite.client.plugins.microbot.shortestpath.WorldPointUtil;
 import net.runelite.client.plugins.microbot.util.coords.Rs2WorldPoint;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.api.tileobject.models.TileObjectType;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 
 import java.util.*;
+import java.util.function.IntSupplier;
 
 @Slf4j
 public class CollisionMap {
+
+    /**
+     * Extra cost, in tiles, on a minigame (Grouping) teleport. They share a 20 minute cooldown and take
+     * several interface clicks, so they should only win when they save a lot of walking; at raw duration
+     * they won nearly every comparison and the walker reached for Grouping even on short trips.
+     */
+    static final int MINIGAME_TELEPORT_PENALTY = 200;
+
+    /**
+     * What the search charges for a teleport edge, in tiles. The bank-vs-direct comparison uses the same
+     * price, so a teleport is never "one tile" there while the pathfinder thinks it costs 40.
+     */
+    public static int teleportCost(int distanceBeforeUsingTeleport, int duration, boolean minigame) {
+        return distanceBeforeUsingTeleport + duration + (minigame ? MINIGAME_TELEPORT_PENALTY : 0);
+    }
+
     // Enum.values() makes copies every time which hurts performance in the hotpath
     private static final OrdinalDirection[] ORDINAL_VALUES = OrdinalDirection.values();
 
@@ -30,22 +47,37 @@ public class CollisionMap {
     private final LiveCollisionOverlay overlay;
 
     /**
+     * Supplies the live player region for instance-only obstacle policy. Static/offline maps use a
+     * sentinel supplier so pathfinding tests never reach into the RuneLite client thread.
+     */
+    private final IntSupplier currentRegionIdSupplier;
+
+    /**
      * Live view pinned for the duration of one search, so a mid-search merge on the client thread cannot
      * mix two states into a single path. Refreshed via {@link #beginSearch()}.
      */
     private LiveEdgeSource pinnedLive;
+
+    /** Number of edge reads answered by the pinned live overlay during the current search. */
+    private long liveEdgeQueries;
 
     public byte[] getPlanes() {
         return collisionData.getRegionMapPlaneCounts();
     }
 
     public CollisionMap(SplitFlagMap collisionData) {
-        this(collisionData, new LiveCollisionOverlay());
+        this(collisionData, new LiveCollisionOverlay(), () -> -1);
     }
 
     public CollisionMap(SplitFlagMap collisionData, LiveCollisionOverlay overlay) {
+        this(collisionData, overlay, CollisionMap::readLivePlayerRegionId);
+    }
+
+    CollisionMap(SplitFlagMap collisionData, LiveCollisionOverlay overlay,
+                 IntSupplier currentRegionIdSupplier) {
         this.collisionData = collisionData;
         this.overlay = overlay;
+        this.currentRegionIdSupplier = currentRegionIdSupplier;
     }
 
     /**
@@ -55,6 +87,7 @@ public class CollisionMap {
      */
     public void beginSearch() {
         pinnedLive = overlay.current();
+        liveEdgeQueries = 0L;
     }
 
     private boolean get(int x, int y, int z, int flag) {
@@ -62,10 +95,19 @@ public class CollisionMap {
         if (live != null) {
             final Boolean liveEdge = live.edge(x, y, z, flag);
             if (liveEdge != null) {
+                liveEdgeQueries++;
                 return liveEdge;
             }
         }
         return collisionData.get(x, y, z, flag);
+    }
+
+    public boolean staticEdge(int x, int y, int z, int flag) {
+        return collisionData.get(x, y, z, flag);
+    }
+
+    public long getLiveEdgeQueries() {
+        return liveEdgeQueries;
     }
 
     public boolean n(int x, int y, int z) {
@@ -219,14 +261,18 @@ public class CollisionMap {
         long now = System.currentTimeMillis();
         if (now - cachedRegionIdTime > REGION_CACHE_MS) {
             try {
-                WorldPoint loc = Rs2Player.getWorldLocation();
-                cachedRegionId = loc != null ? loc.getRegionID() : -1;
+                cachedRegionId = currentRegionIdSupplier.getAsInt();
             } catch (Exception e) {
                 cachedRegionId = -1;
             }
             cachedRegionIdTime = now;
         }
         return cachedRegionId;
+    }
+
+    private static int readLivePlayerRegionId() {
+        WorldPoint loc = Rs2Player.getWorldLocation();
+        return loc != null ? loc.getRegionID() : -1;
     }
 
     public List<Node> getNeighbors(Node node, VisitedTiles visited, PathfinderConfig config, Set<Integer> targets) {
@@ -257,21 +303,30 @@ public class CollisionMap {
                 if (isMoa) moaVisited++;
                 continue;
             }
+            if (transport.getDestination() != null && config.isLearnedBlockedTransport(
+                    node.packedPosition, WorldPointUtil.packWorldPoint(transport.getDestination()))) {
+                continue;
+            }
+            if (config.isWalkBlockedTeleport(transport)) {
+                continue;
+            }
 
             if (TransportType.isTeleport(transport.getType(), transport.getOrigin())) {
                 if (config.isIgnoreTeleportAndItems()) {
                     if (isMoa) moaIgnored++;
                     continue;
                 }
-                int cost = config.getDistanceBeforeUsingTeleport() + transport.getDuration();
-                neighbors.add(new TransportNode(transport.getDestination(), node, cost));
+                int cost = teleportCost(config.getDistanceBeforeUsingTeleport(), transport.getDuration(),
+                        transport.getType() == TransportType.TELEPORTATION_MINIGAME);
+                neighbors.add(new TransportNode(transport.getDestination(), node, cost, transport));
                 if (isMoa) {
                     moaAddedHere++;
                     if (moaCosts == null) moaCosts = new ArrayList<>();
                     moaCosts.add(cost);
                 }
             } else {
-                neighbors.add(new TransportNode(transport.getDestination(), node, transport.getDuration()));
+                neighbors.add(new TransportNode(
+                        transport.getDestination(), node, transport.getDuration(), transport));
             }
             //END microbot variables
         }
@@ -306,8 +361,11 @@ public class CollisionMap {
                 if (!targets.contains(neighborPacked)) {
                     WorldPoint globalWorldPoint = Rs2WorldPoint.convertInstancedWorldPoint(WorldPointUtil.unpackWorldPoint(neighborPacked));
                     if (globalWorldPoint != null) {
-                        TileObject go = Rs2GameObject.getGroundObject(globalWorldPoint);
-                        if (go != null && go.getId() == 45340) {
+                        if (Microbot.getRs2TileObjectCache().query()
+                                .ofType(TileObjectType.GROUND)
+                                .withId(45340)
+                                .at(globalWorldPoint)
+                                .first() != null) {
                             continue;
                         }
                     }
@@ -367,13 +425,18 @@ public class CollisionMap {
                 if (visitedBackward.get(originPacked)) {
                     continue;
                 }
+                if (config.isLearnedBlockedTransport(originPacked, node.packedPosition)) {
+                    continue;
+                }
                 if (TransportType.isTeleport(transport.getType(), transport.getOrigin())) {
                     if (config.isIgnoreTeleportAndItems()) {
                         continue;
                     }
-                    neighbors.add(new TransportNode(origin, node, config.getDistanceBeforeUsingTeleport() + transport.getDuration()));
+                    neighbors.add(new TransportNode(origin, node,
+                            teleportCost(config.getDistanceBeforeUsingTeleport(), transport.getDuration(),
+                                    transport.getType() == TransportType.TELEPORTATION_MINIGAME), transport));
                 } else {
-                    neighbors.add(new TransportNode(origin, node, transport.getDuration()));
+                    neighbors.add(new TransportNode(origin, node, transport.getDuration(), transport));
                 }
             }
         }
@@ -410,8 +473,11 @@ public class CollisionMap {
                 if (!puzzleAllowPacked.contains(prevPacked)) {
                     WorldPoint globalWorldPoint = Rs2WorldPoint.convertInstancedWorldPoint(WorldPointUtil.unpackWorldPoint(prevPacked));
                     if (globalWorldPoint != null) {
-                        TileObject go = Rs2GameObject.getGroundObject(globalWorldPoint);
-                        if (go != null && go.getId() == 45340) {
+                        if (Microbot.getRs2TileObjectCache().query()
+                                .ofType(TileObjectType.GROUND)
+                                .withId(45340)
+                                .at(globalWorldPoint)
+                                .first() != null) {
                             continue;
                         }
                     }
@@ -429,19 +495,14 @@ public class CollisionMap {
                 } else {
                     neighbors.add(new Node(prevPacked, node));
                 }
-            } else if (Math.abs(d.x + d.y) == 1
-                    && isBlocked(WorldPointUtil.unpackWorldX(prevPacked), WorldPointUtil.unpackWorldY(prevPacked), z)) {
-                int wx = WorldPointUtil.unpackWorldX(prevPacked);
-                int wy = WorldPointUtil.unpackWorldY(prevPacked);
-                Set<Transport> ts = config.getTransportsPacked().getOrDefault(prevPacked, Collections.emptySet());
+            } else if (Math.abs(d.x + d.y) == 1 && isBlocked(x, y, z)) {
+                Set<Transport> ts = config.getTransportsPacked().getOrDefault(node.packedPosition, Collections.emptySet());
                 for (Transport transport : ts) {
                     if (transport.getOrigin() == null) {
                         continue;
                     }
-                    if (WorldPointUtil.packWorldPoint(transport.getOrigin()) != prevPacked) {
-                        continue;
-                    }
-                    neighbors.add(new Node(WorldPointUtil.packWorldPoint(wx, wy, z), node));
+                    neighbors.add(new Node(prevPacked, node));
+                    break;
                 }
             }
         }

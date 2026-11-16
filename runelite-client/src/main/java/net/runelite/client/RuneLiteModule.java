@@ -55,7 +55,6 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.menus.MenuManager;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.rs.InjectedClientRuntime;
 import net.runelite.client.task.Scheduler;
 import net.runelite.client.util.DeferredEventBus;
 import net.runelite.client.util.ExecutorServiceExceptionLogger;
@@ -133,7 +132,6 @@ public class RuneLiteModule extends AbstractModule
 		bind(OkHttpClient.class).toInstance(okHttpClient);
 		bind(RuntimeConfigLoader.class).toInstance(configLoader);
 		bind(RuntimeConfigRefresher.class).asEagerSingleton();
-		bind(InjectedClientRuntime.class).toInstance(new InjectedClientRuntime(clientLoader));
 		bind(MenuManager.class);
 		bind(ChatMessageManager.class);
 		bind(ItemManager.class);
@@ -157,9 +155,9 @@ public class RuneLiteModule extends AbstractModule
 
 	@Provides
 	@Singleton
-	Client provideClient(InjectedClientRuntime injectedClientRuntime)
+	Client provideClient()
 	{
-		return injectedClientRuntime.load();
+		return clientLoader.get();
 	}
 
 	@Provides

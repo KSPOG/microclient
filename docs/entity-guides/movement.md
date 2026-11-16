@@ -295,3 +295,437 @@ Sticky interim targets should also clear when route-index progress goes stale. I
 When a route-following minimap click is outside the minimap clip, fallback clicks must stay on the raw path. A generic "reachable tile closer to target" fallback can select a tile far away from the route in open areas, especially near the final destination.
 
 For adjacent same-plane shortcuts, do not treat any movement away from the origin as success. Some shortcuts, such as stepping stones, can fail and place the player on a fallback tile; once the player is settled away from the expected destination, stop the landing wait and replan from the actual tile.
+
+## 14. Match transport execution to its interaction mechanism and interface family
+
+Transport rows do not all represent scene-object clicks, and related networks can use different widget groups. Before admitting new transport data, verify that the walker has an execution branch for the row's actual interaction and selects the interface from the origin object ID. Fail closed for unknown object IDs and tightly identify object-less item actions by their exact origin, destination, action, target, and item requirement.
+
+**Why this matters:** Barrows mound entries use a spade inventory action and therefore have object ID `0`; the generic object executor skips them. River Lum and River Dougne canoe stations open different map interfaces, so waiting unconditionally for the Lum map makes every Dougne route time out.
+
+**Pattern to follow:**
+
+```java
+if (isExactItemActionTransport(transport)) {
+    interactRequiredItem();
+    awaitDestination();
+    return finishHandledTransport(transport);
+}
+
+int mapComponent = mapComponentForOriginObject(transport.getObjectId());
+if (mapComponent < 0) {
+    return false;
+}
+```
+
+**Where this applies:** `Rs2Walker.handleTransports`, specialized transport handlers, and shortest-path transport resource additions.
+
+**Defensive check:** Add pure unit tests for exact item-action recognition and for every supported origin-object-to-interface mapping, plus a loader test proving required item and unlock fields survive TSV parsing.
+
+## 15. Apply the same click guards to every route entry point
+
+Direct and fallback scene clicks must validate the projected click area against the viewport on the client thread. Reuse the validated canvas point when dispatching the click. An on-screen tile check alone can still produce a point outside the usable viewport.
+
+Checkpoint handoffs in the main click branch must use the same close/expiry policy as the start-of-pass check. In particular, entering the preclick distance while moving does not bypass the retarget cooldown.
+
+## 16. Scope global interaction recovery across nested door dispatch
+
+When an object or NPC interaction reacts to the global can't-reach flag by starting a walker approach, keep ownership of that recovery on the current thread until the approach returns. Door interactions issued by that nested walk must bypass the outer can't-reach trigger while leaving the global flag and retry counter intact for the original interaction.
+
+**Why this matters:** The legacy walker lock is reentrant. Without scoped ownership, opening a closed door during an object or NPC recovery starts another recovery walk from inside the first one, replaces the route target, and spends the shared retry budget instead of clicking the door.
+
+**Pattern to follow:**
+
+```java
+if (CantReachTargetRecovery.shouldStart(detectionEnabled, cantReachTarget)) {
+    if (CantReachTargetRecovery.walkTo(originalTarget, 2)) {
+        clearCantReachState();
+    }
+}
+```
+
+**Where this applies:** `Rs2GameObject.clickObject`, `Rs2Npc.interact`, `Rs2NpcModel.interact`, legacy walker door dispatch, and any future interaction helper that starts `Rs2Walker.walkTo` in response to the global can't-reach flag.
+
+**Defensive check:** During a recovery route through a closed door, assert that the door click occurs once, the original object or NPC target is passed unchanged to the walker, nested recovery is suppressed, and retry exhaustion still returns failure.
+
+## 17. Give catalogued opening doors a handler when search selects WALK
+
+Live collision can mark an openable door edge passable so search routes through it. The resulting route may select an ordinary walking edge instead of the parallel catalog transport. Suppress generic door detection only when that opening door has a selected object transport; keep catalog ownership while the route is unavailable and for moves-you objects such as ladders and stiles.
+
+**Why this matters:** Fishing Guild door `20925` stalled in both directions: generic door detection rejected catalog membership, while transport execution required a selected transport and the route contained only walking edges.
+
+**Where this applies:** `Rs2DoorProbe.isCatalogTransportObject`, live collision door masking, and route-selected transport execution.
+
+**Defensive check:** Verify the same catalog door is eligible for generic handling on a WALK edge and excluded on a selected TRANSPORT edge; test entry and exit on the live client.
+
+## 18. Clear successful door crossings at the start of a new walk
+
+The recently-opened suppression window belongs to the route that crossed the door. Clear it when a new walk starts, while retaining the separate per-edge attempt cooldown. Self-closing doors can require another interaction immediately on a return route.
+
+**Why this matters:** Returning into the Fishing Guild within ten seconds of leaving hid entrance door `20925` from detection. A route through both doors selected the inner door first, failed to reach it, and only tried the entrance after the old suppression expired.
+
+**Where this applies:** `Rs2Walker.resetWalkSessionState` and `DoorAttemptLedger`.
+
+**Defensive check:** Exit the guild and immediately route back through both doors. The entrance must be selected before the inner door, with the anti-hammer cooldown still intact.
+
+## 19. Select the first reachable route interaction before an approach click
+
+A minimap target legitimately stops on the near side of a closed door or object transport. Before yielding to an active minimap interim or choosing another approach tile, inspect raw route edges in order and dispatch only the first unresolved interaction whose near-side approach is reachable. A transport origin may itself be blocked by the object, so a reachable adjacent predecessor is sufficient for that selected edge. Check selected transports before same-plane door geometry so ladders and trapdoors that change plane are not skipped. Keep the existing transport executor for its action, variant, and landing rules.
+
+**Why this matters:** Smoothed segments can put an empty approach segment before a visible door or staircase. Treating the first processed segment as the first obstacle delays interaction until the player stops beside it. Continuing a scan after the first door is throttled or fails can click a second door through the first one. A nearby route endpoint also does not make a distant door object reachable.
+
+**Pattern to follow:** Select one raw edge using reachable route tiles and the exact active transport selection; if its action is deferred or fails, keep that edge pending while the walker approaches or retries it. Use the object location for interaction range, not a smoothed segment endpoint.
+
+**Where this applies:** `Rs2Walker` pre-click and active-interim handling, `Rs2WalkerDoors` segment and pending-door scans, and `Rs2DoorGeometry` range checks.
+
+**Defensive check:** With two visible doors, a closed first door must remain selected after a failed click; opening it allows the second. An earlier wall or non-object transport must stop the ranged scan. A cross-plane object transport can be selected from a reachable adjacent approach tile even when its origin is absent from collision reachability.
+
+## 20. Skip backtracked transport edges below the player's raw anchor
+
+Door and scene-object scans retain a lookback window for nearby ordinary doors. Skip transport edges below the player's raw anchor rather than stopping the scan or dispatching them again. Only transports at or ahead of the anchor block later interactions. The recent handled-transport window expires after eight seconds and does not record crossings made by plain walking.
+
+**Why this matters:** A player paused just beyond a same-plane gate could never handle a door ahead after recent-transport suppression expired.
+
+**Where this applies:** `Rs2Walker` raw-route scene and pending-door scans, `handleFirstRouteInteractionAtRange` transport-map construction, and `Rs2WalkerDoors.handlePendingDoorNearRawPath`.
+
+**Defensive check:** With a transport behind the raw anchor and a door ahead, select the door outside the suppression window and after plain walking. Transports at or ahead of the anchor must still block later doors. Test the production transport map used by both the pending-interaction predicate and the blocked-transport predicate, rather than filtering only the test predicates.
+
+## 21. Apply the shared energy policy before clicking the run orb
+
+Every run-enable caller must pass through `Rs2Player.toggleRunEnergy`: energy must exceed
+`Microbot.runEnergyThreshold` in hundredths of a percent (default 1000 = 10%). The
+walker previously checked whole percentages in one path while direct scene/bank calls
+bypassed the check. An already satisfied state and explicit disable do not require energy.
+
+**Why this matters:** At zero energy, repeated requests cannot enable run. The orb's
+canvas location is its bounding-box corner, outside its circular hit area. Read visibility
+and bounds on the client thread and target the center; perform mouse gestures off-thread.
+A click is only a request: the helper returns true only if the desired state is observed,
+and throttles retries while the update is pending. Normal script iterations can retry.
+
+**Where this applies:** `Rs2Player`, `Rs2Walker`, `Rs2WalkerMovement`, bank/deposit helpers,
+and the base `Script` auto-run policy. The shared threshold now consistently uses raw
+energy (>1000 by default), replacing the walker's rounded >10% (>=1100) check.
+
+**Defensive check:** `Rs2PlayerRunEnergyTest` covers threshold boundaries, explicit disable,
+missing/hidden orbs, interior geometry, pending updates, and client-thread requests.
+
+## 22. A scene walk click is only valid on a tile rendered at click time
+
+`MenuAction.WALK` carries canvas coordinates. The client resolves the destination from the
+tile under that point during the next rendered frame. A point over an unrendered tile selects
+nothing. If the camera or player moved after the point was computed, it selects a different
+tile. Checking that the projection lies inside the viewport proves neither condition.
+
+**Why this matters:** Software rendering (GPU off) draws only 25 tiles around the camera eye,
+not around the player. `Scene.getDrawDistance()` keeps reporting the GPU value after GPU is
+disabled, so read `client.isGpu()` first. Tiles beyond that square still project into the
+viewport, and the old helper reported success for clicks that set no destination. Route
+camera turns held by arrow keys can also move the view during the natural-mouse gesture.
+
+**Where this applies:** `Rs2WalkerMovement.walkFastCanvasOnScreenOnly`, `dispatchSceneWalk`,
+and the public `Rs2Walker.walkFastCanvas`. Toggle run before computing the point. Reject tiles
+within 2 of the rendered edge, and skip scene clicks while the walker is turning the camera.
+After dispatch, report success only once the client destination lies within 2 tiles of the
+target. Otherwise return false so the caller's minimap fallback runs once. After two
+consecutive failures, scene clicks pause for 3 seconds.
+
+**Defensive check:** `SceneClickPolicyTest` covers draw-distance selection, camera-relative
+bounds, destination classification, and bounded suppression.
+
+## 23. Route camera turns are for targets the scene cannot reach
+
+`Rs2Walker.alignCameraTowardWalkTarget` runs after every scene and minimap walk click. A
+visible, rendered click target gains nothing from a turn. The turn only moves the view the
+user is watching, and while its arrow keys are held, scene clicks are skipped.
+
+**Why this matters:** The old alignment re-randomised yaw offset and pitch every 5–10 seconds
+and turned even when the target was on screen. On five fixed routes, 22 of 29 turns started
+while the destination was already clickable.
+
+**Where this applies:** `RouteCameraPolicy.decide`. Turn only when the target is at least
+4 tiles away, 1.2 seconds have passed since the last turn, and one of two conditions holds:
+the target is not scene-clickable, or a scene click failed within the last 2 seconds. When
+the heading is within 20 degrees, turn only if a view variation is due. View variation
+(yaw offset and pitch) is applied only to turns that are already needed. After a scene
+fallback click toward a nearer visible tile, the walker aligns toward the requested target.
+
+**Defensive check:** `RouteCameraPolicyTest` covers visible, hidden, aligned, recently
+failed, near, and throttled cases.
+
+## 24. A camera turn is finished only when the yaw stops changing
+
+Releasing the arrow key does not stop the camera. The yaw keeps easing for several client
+ticks, and any canvas point computed in that window belongs to a view that no longer exists.
+
+**Why this matters:** In a live probe at the Grand Exchange, the yaw kept changing for
+115–126 ms (7 client ticks) after `setAngle` released the key. It drifted another 12.6–17.6
+degrees, and the target object's canvas point moved 56–121 px. Door and transport
+interactions click right after `turnTo`, so they could land on a stale position.
+
+**Where this applies:** `Rs2Camera.setAngle`, `turnTo` and `adjustPitch` all go through
+`holdUntil`. After releasing the key, it waits with `sleepUntil` (600 ms cap) until yaw and
+pitch read the same on two samples taken on different client ticks. Each sample is read on
+the client thread. Callers should not add their own sleeps after `turnTo`.
+
+The settle check cannot tell our own coasting apart from anything else that moves the camera.
+While `NpcTracker` is steering the yaw with `setCameraYawTarget`, the QoL plugin's smooth camera
+tracking is on, or the user is dragging the camera, the yaw never holds still for two ticks
+and every turn waits the full 600 ms cap before returning. That is the bound working, not a
+hang; the view is still moving when the call returns, so a canvas point taken right after it
+can still be stale.
+
+If the client-thread read fails (thread interrupted or the client-thread timeout), `getYaw` and
+`getPitch` fall back to reading the camera directly instead of returning 0. A yaw of 0 is
+north and a pitch of 0 sends `adjustPitch` holding UP, so a fake 0 looked like a real angle.
+`adjustPitch` returns without pressing a key when the pitch is already at the target.
+
+**Defensive check:** `Rs2CameraSettleTest` simulates a camera that coasts after release. It
+also covers the timeout bound and the client-thread no-op.
+
+## 25. Bound scene tile loops by the tile array, not `Constants.SCENE_SIZE`
+
+The local player's worldview is not always the 104x104 top-level scene. On a sailing boat
+the player stands in a sub-worldview whose `Scene.getTiles()` is only 8 or 16 tiles wide.
+A loop that runs `x, y < Constants.SCENE_SIZE` over that array throws
+`ArrayIndexOutOfBoundsException` at the boat's width.
+
+**Why this matters:** `Rs2GameObject.getSceneObjects` read tiles from
+`player.getWorldView().getScene()` and looped to `SCENE_SIZE`. Every scene-object query made
+from a boat threw `Index 8 out of bounds for length 8`, which aborted the walker inside
+`handleNearbyRawPathSceneObjects` and crashed banking in scripts that called `findBank`.
+
+**Pattern to follow:** take the loop bounds from the array you index (`tiles[z].length`,
+`tiles[z][0].length`), or from `worldView.getSizeX()` / `getSizeY()`, whenever the tiles come
+from a worldview that is not guaranteed to be the top-level one.
+
+**Defensive check:** `Rs2GameObjectSmallWorldViewTest` queries wall objects on an 8x8
+worldview and expects the object on the last tile.
+
+## 26. Null-check `LocalPoint.fromWorld` before converting instance coordinates
+
+`LocalPoint.fromWorld(worldView, worldPoint)` returns `null` when the plane differs from the world view's plane or the tile is outside that scene, for example in an instance while the scene is still loading. The fallback below only prevents the crash: if the player is on a boat sub-worldview, `player.getLocalLocation()` is in boat space and does not give the real sea position. `WorldPoint.fromLocalInstance` dereferences its `LocalPoint` immediately, so the result must be checked first.
+
+**Why this matters:** `Rs2Player.getWorldLocation_Internal()` passed the `fromWorld` result straight into `fromLocalInstance`. Telemetry for 2.6.30 and 2.6.31 recorded about 585 NullPointerExceptions, most from `KourendLibraryOverlay.render` calling `Rs2Player.getWorldLocation()` every frame.
+
+**Pattern to follow:**
+
+```java
+// Wrong: NPE when the world point does not resolve in the top-level scene.
+LocalPoint l = LocalPoint.fromWorld(client.getTopLevelWorldView(), player.getWorldLocation());
+return WorldPoint.fromLocalInstance(client, l);
+
+// Right: fall back to the player's own local point, then to the raw world point.
+LocalPoint l = LocalPoint.fromWorld(client.getTopLevelWorldView(), player.getWorldLocation());
+if (l == null) l = player.getLocalLocation();
+if (l == null) return player.getWorldLocation();
+return WorldPoint.fromLocalInstance(client, l);
+```
+
+**Where this applies:** `Rs2Player.getWorldLocation_Internal()` and any helper that converts an actor's world point to an instance template point.
+
+**Defensive check:** Mock a world view whose plane differs from the player's world point and assert the helper returns a fallback point, as in `Rs2PlayerInstanceWorldLocationTest`.
+
+## 27. Bounds-check a `LocalPoint` against its own worldview before projecting it
+
+`Perspective.getCanvasTilePoly` only rejects points outside the extended scene (`getSizeX() + 2 * ESCENE_OFFSET` on the top-level view). A tile with scene X/Y in 104..143, or a negative one, still reaches `WorldView.getTileHeight`, which indexes the normal scene height array and throws `ArrayIndexOutOfBoundsException`. Resolve the worldview from `localPoint.getWorldView()` and check the scene X/Y against `0..getSizeX()-1` / `0..getSizeY()-1` before projecting.
+
+**Why this matters:** `Rs2Camera.isTileOnScreen` passed NPC and tile-object local points straight to `getCanvasTilePoly`. Telemetry for 2.6.30 to 2.6.32 recorded `Index 109/111/126 out of bounds for length 105` from `Rs2NpcModel.click` and `Rs2TileObjectModel.click`, which aborted the interaction instead of turning the camera.
+
+**Pattern to follow:**
+
+```java
+// Wrong: out-of-scene points throw inside Perspective.
+Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
+
+// Right: treat a point outside its worldview's scene as off screen.
+if (localPoint == null) return false;
+WorldView wv = client.getWorldView(localPoint.getWorldView());
+if (wv == null || localPoint.getSceneX() < 0 || localPoint.getSceneY() < 0
+        || localPoint.getSceneX() >= wv.getSizeX() || localPoint.getSceneY() >= wv.getSizeY()) return false;
+Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
+```
+
+**Where this applies:** `Rs2Camera.isTileOnScreen(LocalPoint)`, `Rs2Camera.isTileOnScreen(TileObject)`, and any helper that projects an entity's local point to the canvas.
+
+**Defensive check:** Mock a worldview whose `getTileHeight` throws and assert out-of-scene points return false without calling it, as in `Rs2CameraTileOnScreenTest`.
+
+## 28. A door attempt that ends on the near side is a refusal, not a traversal
+
+Judge a door crossing by the edge's own axis (`Rs2DoorGeometry.crossedDoorAxis`), not by whether the player changed side relative to the door object's tile. A wall door usually sits on the near-side tile of its edge, so walking onto that tile, or onto its row or column, flips the object-relative reading while the player is still in front of the door. Count a cross-nudge that leaves the player stationary on the near-side tile as a refusal too. Keep the walk-scoped strike-out blocks with the outermost walk: a can't-reach recovery walk nested inside it is not a new walk session.
+
+**Why this matters:** During Misthalin Mystery auto-play the route went through locked door 30117. Each open click was read as a traversal because the player stepped from (1634,4839) to (1633,4838), level with the door at (1633,4837). That verdict wiped the door's strikes and hid it as recently opened, the follow-up nudge moved the player onto the near-side tile and was not counted, and `door_recovery_suppressed | reason=nearby-route-door` kept the walk waiting for handlers that would never strike the door out. The strike-outs that did land were lifted again by the nested can't-reach recovery walk the next door click started. The walker looped for about 11 minutes.
+
+**Pattern to follow:**
+
+```java
+// Wrong: object-relative side flip counts the approach as a crossing.
+return movedAcrossInteractedObject(start, end, doorTile) && end.distanceTo2D(toWp) < start.distanceTo2D(toWp);
+
+// Right: on a cardinal edge the player must be at or beyond the far side.
+if (isCardinalEdge(fromWp, toWp) && !Rs2DoorGeometry.crossedDoorAxis(fromWp, toWp, end)) return false;
+```
+
+**Where this applies:** `Rs2WalkerDoors.didTraverseInteractedDoor`, `Rs2WalkerDoors.tryDoorEdgeCrossNudge`, `Rs2Walker.withdrawPreviousWalkScopedBlocks`, and any door verdict that feeds `DoorAttemptLedger` strikes.
+
+**Defensive check:** Replay the loop as pure verdicts against a `DoorAttemptLedger` and assert the edge strikes out within `DOOR_CROSS_FAILURE_STRIKE_LIMIT` cycles, as in `LockedDoorStrikeOutTest`.
+
+## 29. Null-check a scene `Tile` before pathing from or to it
+
+A slot in `scene.getTiles()[plane][x][y]` can be `null` even when the `LocalPoint` for that position resolved, for example an empty tile or a slot that has not been filled yet after a region change. `Rs2Tile.pathTo` and `Rs2Tile.fullPathTo` treat a missing endpoint as "no path", and callers that read a tile from the scene array must do the same before using it.
+
+**Why this matters:** `Rs2WorldPoint.pathTo` passed the scene tile straight into `Rs2Tile.fullPathTo`, which called `source.getPlane()`. Telemetry for 2.6.38 recorded a `NullPointerException` from `Rs2GameObject.canReach`, which threw instead of returning `false`.
+
+**Pattern to follow:**
+
+```java
+// Wrong: the scene slot may be empty.
+Tile sourceTile = tiles[plane][x][y];
+return Rs2Tile.fullPathTo(sourceTile, targetTile);
+
+// Right: no tile means no path.
+Tile sourceTile = tiles[plane][x][y];
+if (sourceTile == null || targetTile == null) return null;
+return Rs2Tile.fullPathTo(sourceTile, targetTile);
+```
+
+**Where this applies:** `Rs2WorldPoint.pathTo`, `Rs2Tile.pathTo`, `Rs2Tile.fullPathTo`, and any helper that reads a `Tile` from the scene array.
+
+**Defensive check:** Mock a scene with an empty source or target slot and assert the path is `null`, as in `Rs2WorldPointNullSceneTileTest` and `Rs2TileNullPathEndpointTest`.
+
+## 30. In resizable mode the viewport runs under the side panel, chatbox and minimap
+
+`client.getViewportXOffset/YOffset/Width/Height` covers the whole canvas in the resizable layouts, so a tile that projects inside the viewport can still be drawn under the inventory/side panel, the chatbox or the minimap. A `WALK` menu entry clicks `param0/param1` exactly, so a scene click point under one of those interfaces lands on the interface. Reject scene click points whose click box intersects a visible top-level overlay container and let the caller use the minimap instead.
+
+**Why this matters:** A Discord report on a clean main build showed the walker clicking the inventory while walking. `Rs2WalkerMovement.sceneCanvasPoint` and `Rs2Camera.isTileOnScreen` only tested the viewport rectangle, so `dispatchSceneWalk` clicked a tile point behind the side panel.
+
+**Pattern to follow:**
+
+```java
+// Wrong: viewport bounds alone in resizable mode.
+return isCanvasPointInsideViewport(canvasPoint, viewport) ? canvasPoint : null;
+
+// Right: also reject points covered by a visible side panel, chatbox or minimap container.
+if (!isCanvasPointInsideViewport(canvasPoint, viewport)
+        || isCanvasPointCoveredByInterface(canvasPoint, visibleSceneOverlayBounds())) return null;
+```
+
+**Where this applies:** `Rs2WalkerMovement.sceneCanvasPoint`, `Rs2WalkerMovement.isSceneCanvasClickable`, `Rs2WalkerMovement.dispatchSceneWalk`, and any helper that clicks a projected canvas point with a `WALK` entry.
+
+**Defensive check:** Assert points inside, touching and outside overlay rectangles against `isCanvasPointCoveredByInterface`, as in `Rs2WalkerUnitTest.sceneClickRejectsPointsCoveredByVisibleInterfaces`.
+
+## 31. The player location can be `null` right after a transport
+
+`Rs2Player.getWorldLocation()` returns `null` while the local player is missing, which happens while the destination area loads after a teleport, ladder or region-crossing door. Location-derived predicates such as `Rs2Player.isInCave()` must answer `false` for a missing location instead of dereferencing it.
+
+**Why this matters:** `Rs2WalkerTransports.finishHandledTransport` restarts pathfinding immediately after a transport, and `Rs2WalkerLifecycleRuntime.restartPathfinding` passes `Rs2Player.isInCave()` to the route request. Telemetry for 2.6.43 recorded a `NullPointerException` from `isInCave` that aborted the walk after the transport had already succeeded.
+
+**Pattern to follow:**
+
+```java
+// Wrong: the location is null while the new area loads.
+return Rs2Player.getWorldLocation().getY() >= 6400;
+
+// Right: no location means no cave.
+WorldPoint location = Rs2Player.getWorldLocation();
+return location != null && location.getY() >= 6400;
+```
+
+**Where this applies:** `Rs2Player.isInCave`, `Rs2WalkerDoors.isInStrongholdOfSecurity` and any helper that reads `Rs2Player.getWorldLocation()` during a walk or transport handoff.
+
+**Defensive check:** Mock `Rs2PlayerStateCache.getLocalPlayerPosition()` to return `null` and assert the predicate is `false`, as in `Rs2PlayerIsInCaveTest`.
+
+## 32. Click a dropdown row on the row, not with a placeholder rectangle
+
+`Microbot.doInvoke(entry, new Rectangle(1, 1))` clicks wherever the pointer already rests. After a dropdown toggle that is the toggle itself, so the "row" click toggles the list shut before `Select` lands. Click inside the row's visible bounds, clipped to the scrolling list, and give up when there is no visible list.
+
+**Why this matters:** The Grouping (minigame) teleport opened the dropdown, clicked the toggle again instead of the destination row, and retried every walker pass. The repeated dropdown clicking was noticed in the field. None of those clicks were recorded as transport interactions, so the edge never struck out.
+
+**Pattern to follow:**
+
+```java
+// Wrong: clicks the resting pointer, which is the toggle just clicked.
+Microbot.doInvoke(destinationMenuEntry, new Rectangle(1, 1));
+
+// Right: click the visible part of the row (bounds read on the client thread) and record the interaction.
+Rectangle rowArea = Microbot.getClientThread().runOnClientThreadOptional(
+        () -> visibleRowArea(destinationWidget.getBounds(), minigameWidgetParent.getBounds())).orElse(null);
+if (rowArea == null) return false;
+Microbot.doInvoke(destinationMenuEntry, rowArea);
+noteTransportInteraction();
+```
+
+Teleports have no catalog origin, so key their refusals with `Rs2WalkerTransports.refusalOrigin` (the route step's start tile). Otherwise the verdict never reads "still at origin" and the strike is never recorded.
+
+**Where this applies:** `Rs2WalkerTransports.handleMinigameTeleport`, `Rs2WalkerTransports.dispatchSelectedTransport` and any widget-list selection dispatched through `Microbot.doInvoke`.
+
+**Defensive check:** `Rs2WalkerTransportsMinigameTeleportTest` covers a row inside the list, a row scrolled out of view and a missing list.
+
+## 33. Price teleport hops the same way in bank-vs-direct as in the pathfinder
+
+The pathfinder charges a teleport edge `distanceBeforeUsingTeleport + duration`, plus `CollisionMap.MINIGAME_TELEPORT_PENALTY` for a Grouping teleport. The bank-vs-direct comparison counts path tiles, where a teleport is a single step. Add the same price through `CollisionMap.teleportCost`, or the comparison sees a teleport as one tile while the search sees forty.
+
+**Why this matters:** Minigame teleports were priced at their raw duration and won nearly every comparison, so the walker reached for Grouping, which has a 20-minute cooldown and needs several interface clicks, even on short trips.
+
+**Where this applies:** `CollisionMap` teleport neighbours, `Rs2WalkerBankingPlanner.transportHopCost` and every route-distance comparison that mixes walking tiles and transports.
+
+**Defensive check:** `BankedTransportItemPlanningTest.minigameTeleportIsPricedForItsCooldownNotAsOneTile` and `itemTeleportCostsItsDurationAndObjectTransportsStayOneStep`.
+
+## 34. Walk can't-reach recovery to the template tile, off the client thread
+
+In an instance (player-owned house, Tempoross), `TileObject.getWorldLocation()` and `Actor.getWorldLocation()` return raw instance coordinates such as `(12630, 12568)`, while `Rs2Player.getWorldLocation()` and the walker work in template coordinates. Pass the recovery target through `CantReachTargetRecovery.templateLocation` before walking. `CantReachTargetRecovery.shouldStart` returns `false` on the client thread, because the walker refuses to run there. Count attempts with `CantReachTargetRecovery.countAttempt()` and read them with `CantReachTargetRecovery.retries()`, which drops attempts older than `RETRY_WINDOW_MS`.
+
+**Why this matters:** In 2.6.43 and 2.6.44, Construction (larder hotspot 15403) and Tempoross (object 41010) players saw the "Your bot tried to interact with an object" box and had all scripts paused. In the house every recovery walk targeted a raw instance tile and the walker logged `UNREACHABLE cause=no-walkable-path`. At Tempoross the click ran on the client thread and four attempts were used up in one second. The house count also carried over 47 minutes.
+
+**Where this applies:** `Rs2TileObjectModel.click`, `Rs2NpcModel.click`, `Rs2Npc.interact` and any helper that starts a can't-reach recovery walk.
+
+**Defensive check:** `Rs2TileObjectModelClickRecoveryTest.walksToTheTemplateTileInAnInstance`, `clicksWithoutWalkingOrCountingOnTheClientThread` and `CantReachTargetRecoveryTest.staleAttemptsDoNotCarryOverToALaterRecovery`.
+
+## 35. A door next to a walled edge does not always own that edge
+
+When a route click is refused, the walker does not learn the edge as walled if an actioned door sits within one tile of it. This exists for double gates, where only one wing has the Open action. A plain wall can also have an unrelated door beside it. The claim on that edge must not stay alive just because the same refused click keeps renewing it. Track when refusals of this exact edge started in `adjacentRefusalSinceMs`. That tracking is kept apart from the door claim, so it survives a claim that expires between slow walker passes, and it only restarts after a gap of `WalledDoorClaimPolicy.ADJACENT_REFUSAL_GAP_MS`. Once the edge has been refused for longer than `WalledDoorClaimPolicy.FRESH_MS` without opening, drop the claim, learn the edge and replan. The block lasts for this walk only: it is recorded with `DoorAttemptLedger.recordWalkScopedBlock`, and `withdrawWalkScopedDoorBlocks` gives a real double gate that was slow to open a fresh chance on the next walk. A plain wall with no door nearby is still learned for the whole session.
+
+Keep two answers apart. "A door sits beside the edge" (`Rs2WalkerDoors.classifyDoorAdjacentToEdge` returns anything but `NONE`) decides the scope: the block stays walk-scoped. "The adjacent-door handler can act on that door" (`ACTIONABLE`: not blacklisted, not recently opened, not a catalog transport) decides whether to wait on a claim at all. While the claim is held, `resolveActiveDoorClaim` must run `handleDoorAdjacentToClaimedEdge`, because the exact-segment door scan never finds a door that is only beside the edge. When the handler declines, the walker still approaches the edge. An edge is struck out in `struckOutAdjacentDoorEdges` when the handler started a click on the door (`AdjacentDoorOutcome.ATTEMPTED`, which also counts a click that failed) and the edge was refused again afterwards. That covers both endings: the door stayed shut until the claim window was spent, or the door opened (so it now reads `UNUSABLE` or `NONE`) and the step is still walled. A struck-out edge is learned at the first refusal for `WalledDoorClaimPolicy.ADJACENT_STRIKE_OUT_MS`, after which the door gets another try.
+
+The walker should not be sent across such a wall in the first place. `LiveCollisionCapture.findDoorEdges` records only a wall door's own oriented edge as known and passable (`LiveCollisionDoorMask.markWall`). Every other edge touching the door's tile is deferred (`markWallFootprint`) and left unknown, so the static map decides. Do not record those edges passable: a fixed wall can share the tile with a door. Do not record them from the live flags either: a closed door's flags there were persisted as walls and sealed the Falador farm. Bump `LiveCollisionCapture.CAPTURE_VERSION` whenever this changes, or persisted regions keep the old edges.
+
+**Why this matters:** In 2.6.50, Mahogany Homes stood still for 20 minutes on East Ardougne 2656,3293 while walking to the bank. The edge 2656,3292 -> 2656,3291 is a wall with a door beside it. Every pass logged `walled_door_owned ... state=await-door-handler`, and the edge was never learned. In 2.6.55 the same edge was held for 6 seconds on every walk while nothing clicked the door, then learned for that walk only, so each walk stalled again. The shipped collision map has this edge as a wall (the whole line x=2650..2657 on the north side of y=3291) and routes around it to the west; so the route across it has to come from the live overlay. Up to capture version 3, `LiveCollisionCapture.findDoorEdges` exempted every edge touching an openable wall door's tile and `build` recorded it known and passable, which overrides the static wall. Version 4 leaves those edges unknown. This has not been confirmed in game: the object beside this edge is not identified, and the cause only holds if it is a wall door standing on 2656,3292 or 2656,3291.
+
+**Where this applies:** `Rs2WalkerMovement.learnWalledRouteEdge`, `Rs2Walker.resolveActiveDoorClaim` and any heuristic that hands a refused edge to the door pipeline instead of learning it.
+
+**Defensive check:** `WalledDoorClaimPolicyTest.adjacentClaimKeptFreshByTheSameRefusalIsSpentAfterOneWindow`, `refusalsSlowerThanTheClaimWindowStillSpendTheAdjacentClaim`, `WalledEdgeBesideDoorLearningTest.spentClaimLearnsTheEdgeForThisWalkOnlyAndDropsTheClaim`, `aDoorTheHandlerCannotActOnIsNotClaimedAndBlocksTheEdgeForThisWalkOnly`, `anEdgeWhoseDoorWasTriedAndFailedIsNotClaimedAgainOnTheNextWalk`, `anEdgeWhoseDoorOpenedButStayedWalledIsNotClaimedAgainOnTheNextWalk`, `AdjacentDoorHandlerTest`, and `LiveCollisionTest.wallBesideAWallDoorIsLeftToTheStaticMap`.
+
+## 36. A clicked home teleport is not a cast that started
+
+`Rs2Magic.quickCast(String)` returns `true` once the spell widget was clicked. The game can still answer with "You can't use that teleport at the moment." and never start the cast. Before waiting the long home teleport landing window, confirm that an animation started after the click (or that the player already landed). `Rs2Player.isAnimating()` is not that signal: it stays true for 600 ms after any earlier animation. When no cast started, block that home teleport for the rest of the walk, whatever tile the next plan starts from, and report the transport as not handled. The tile-keyed refusal ledger alone lets a replan from another tile cast it again. All four spellbook home teleports share this path.
+
+**Why this matters:** In 2.6.57 a quest walk from Varrock chose the Lumbridge Home Teleport as its first leg. The game refused the cast, and the walker waited the full 35 s landing window with no log line while the character stood still.
+
+**Pattern to follow:**
+
+```java
+// Wrong: the click succeeded, so wait 35 s for a landing that may never come.
+landed = sleepUntilTrue(() -> isPlayerWithinChebyshevOf(dest, OFFSET), 600, 35000);
+
+// Right: give the cast a short window to start, then wait for the landing, and act on the outcome.
+Instant animationBeforeCast = Rs2Player.lastAnimationTime;
+// ... click the spell ...
+landed = settleHomeTeleport(transport, awaitHomeTeleportLanding(
+        () -> animationStartedAfter(animationBeforeCast, Rs2Player.lastAnimationTime),
+        () -> isPlayerWithinChebyshevOf(dest, OFFSET),
+        () -> Thread.currentThread().isInterrupted() || InputArbiter.isHuman(),
+        HOME_TELEPORT_CAST_START_TIMEOUT_MS, HOME_TELEPORT_LANDING_TIMEOUT_MS));
+```
+
+**Where this applies:** `Rs2WalkerTransports.awaitHomeTeleportLanding`, `settleHomeTeleport`, `PathfinderConfig.blockTeleportForWalk` and any wait that follows a spell or item click whose only success signal is the click itself.
+
+**Defensive check:** `Rs2WalkerTransportsCombatTest.refusedHomeTeleportCastDoesNotWaitForTheLanding`, `abortedWaitIsNotReportedAsARefusedCast`, `onlyAnAnimationAfterTheClickCountsAsACastStart`, `onlyARefusedCastBlocksTheHomeTeleportForTheWalk`, `refusedHomeTeleportIsNotPlannedAgainFromAnyStartTileUntilTheNextWalk` and `everySpellbookHomeTeleportSharesTheHomeTeleportWait`.
+
+## 37. A can't-reach recovery walk that ends beside the object still clicks it
+
+The recovery walk asks the walker for a tile within 2 of the object's own tile. An object set into a wall (a cave mouth) has no tile around it that the walker accepts as an arrival, so `Rs2Walker.walkTo` returns `false` while the player already stands 2 tiles away, where the game accepts the click. When the walk returns `false`, check `CantReachTargetRecovery.withinRange(distanceToPlayer(), CANT_REACH_RECOVERY_DISTANCE)`. Inside the range, clear `Microbot.cantReachTarget` and send the click. Keep the attempt count: only the game answering can't-reach again raises it, so the paused-scripts box still shows after 3 to 5 refused clicks. Outside the range, or with an unknown distance, refuse the click as before.
+
+**Why this matters:** In 2.6.57, Gem Crab Killer never crawled through cave 57631 at (1279,3168) to the next crab. Three recovery walks stopped at (1277,3168) with `arrival_declined_unreachable` and `path-endpoint-short-of-target`, the cave was never clicked again, and the third attempt paused all scripts. The player then crawled through by hand from (1277,3169).
+
+**Where this applies:** `Rs2TileObjectModel.click` (`recoverFromCantReach`).
+
+**Defensive check:** `Rs2TileObjectModelClickRecoveryTest.clicksWhenTheRecoveryWalkEndsWithinRangeOfTheObject`, `doesNotClickWhenTheRecoveryWalkFailsAwayFromTheObject`, `pausesOnlyAfterTheGameKeepsRefusingClicksBesideTheObject` and `CantReachTargetRecoveryTest.onlyAKnownDistanceInsideTheRangeCountsAsBesideTheTarget`.

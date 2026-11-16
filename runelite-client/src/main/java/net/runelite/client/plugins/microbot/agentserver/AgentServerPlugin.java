@@ -1,18 +1,30 @@
 package net.runelite.client.plugins.microbot.agentserver;
 
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.UnsynchronizedAppenderBase;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSerializer;
 import com.google.inject.Provides;
 import com.sun.net.httpserver.HttpServer;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
+import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.agentserver.handler.*;
+import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.util.ResetResistantAttachment;
+import org.slf4j.LoggerFactory;
 
 import javax.inject.Inject;
 import java.io.IOException;
@@ -22,8 +34,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,18 +68,45 @@ public class AgentServerPlugin extends Plugin {
 	@Inject
 	private DrawManager drawManager;
 
+	@Inject
+	private MicrobotPluginManager microbotPluginManager;
+
 	private HttpServer server;
 	private net.runelite.client.plugins.microbot.agentserver.uds.UdsHttpServer udsServer;
 	private ExecutorService executor;
 	private Thread shutdownHook;
-	private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+	private ResetResistantAttachment errorCapture;
+	private volatile boolean ownsTokenFile;
+	private final Gson gson = createGson();
 
 	private java.util.concurrent.ScheduledExecutorService stealthScheduler;
 	private volatile boolean stealthActive = false;
 	private static final long STEALTH_IDLE_GRACE_MS = 20_000;
 
+	static Gson createGson() {
+		JsonSerializer<Collection<?>> collectionSerializer = (src, type, ctx) -> {
+			JsonArray array = new JsonArray();
+			for (Object element : src) {
+				array.add(ctx.serialize(element));
+			}
+			return array;
+		};
+		JsonSerializer<Map<?, ?>> mapSerializer = (src, type, ctx) -> {
+			JsonObject object = new JsonObject();
+			for (Map.Entry<?, ?> entry : src.entrySet()) {
+				object.add(String.valueOf(entry.getKey()), ctx.serialize(entry.getValue()));
+			}
+			return object;
+		};
+		return new GsonBuilder()
+				.registerTypeHierarchyAdapter(Collection.class, collectionSerializer)
+				.registerTypeHierarchyAdapter(Map.class, mapSerializer)
+				.disableHtmlEscaping()
+				.create();
+	}
+
 	private static Path defaultUdsSocketPath() {
-		return Paths.get(System.getProperty("user.home"), ".runelite", ".agent.sock");
+		return Paths.get(System.getProperty("user.home"), ".runelite", "agent", "agent.sock");
 	}
 
 	@Provides
@@ -73,6 +116,8 @@ public class AgentServerPlugin extends Plugin {
 
 	@Override
 	protected void startUp() throws Exception {
+		attachErrorCapture();
+		applyTraceConfig();
 		if (config.bindOnlyWhileScriptsActive()) {
 			log.info("Agent server in stealth-bind mode; socket will open when a script begins running.");
 			startStealthScheduler();
@@ -121,12 +166,13 @@ public class AgentServerPlugin extends Plugin {
 		}, "AgentServer-Shutdown");
 		Runtime.getRuntime().addShutdownHook(shutdownHook);
 		Path tokenFile = writeTokenFile(token);
+		ownsTokenFile = tokenFile != null;
 		log.info("Agent server started ({} endpoints; auth enabled, token {})",
 				handlers.size(), tokenFile != null ? "at " + tokenFile : "file unavailable");
 	}
 
 	private List<AgentHandler> buildHandlers(int maxResults) {
-		return Arrays.asList(
+		List<AgentHandler> handlers = new ArrayList<>(Arrays.asList(
 				new WidgetListHandler(gson, maxResults),
 				new WidgetSearchHandler(gson, maxResults),
 				new WidgetDescribeHandler(gson),
@@ -152,8 +198,21 @@ public class AgentServerPlugin extends Plugin {
 				new QuestHelperHandler(gson),
 				new StateMachineDebugHandler(gson),
 				new ProfileHandler(gson),
-				new DynamicScriptDeployHandler(gson)
-		);
+				new DynamicScriptDeployHandler(gson),
+				new ObserveHandler(gson, client),
+				new PathHandler(gson),
+				new VarChangesHandler(gson),
+				new TileHandler(gson),
+				new PluginHubHandler(gson, microbotPluginManager, maxResults),
+				new GrandExchangeHandler(gson)
+		));
+		List<String> paths = new ArrayList<>();
+		for (AgentHandler handler : handlers) {
+			paths.add(handler.getPath());
+		}
+		Collections.sort(paths);
+		handlers.add(new CatalogHandler(gson, paths));
+		return handlers;
 	}
 
 	private boolean startTcp(List<AgentHandler> handlers) {
@@ -203,17 +262,72 @@ public class AgentServerPlugin extends Plugin {
 	}
 
 	@Subscribe
+	public void onChatMessage(ChatMessage event) {
+		AgentLogs.recordChat(event.getType(), event.getMessage());
+	}
+
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event) {
+		AgentLogs.recordMenu(event);
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event) {
+		AgentLogs.recordVar(event);
+	}
+
+	private void attachErrorCapture() {
+		detachErrorCapture();
+		LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+		UnsynchronizedAppenderBase<ILoggingEvent> appender = new UnsynchronizedAppenderBase<>() {
+			@Override
+			protected void append(ILoggingEvent event) {
+				AgentLogs.recordError(event);
+			}
+		};
+		appender.setName("AgentServerErrors");
+		appender.setContext(context);
+		appender.start();
+		errorCapture = ResetResistantAttachment.attach(context, appender, appender::start);
+	}
+
+	private void detachErrorCapture() {
+		if (errorCapture != null) {
+			errorCapture.remove();
+			errorCapture = null;
+		}
+	}
+
+	@Subscribe
 	public void onConfigChanged(ConfigChanged event) {
-		if (!AgentServerConfig.GROUP.equals(event.getGroup()) || !AgentServerConfig.KEY_TOKEN.equals(event.getKey())) {
+		if (!AgentServerConfig.GROUP.equals(event.getGroup())) {
+			return;
+		}
+		if (AgentServerConfig.KEY_TRACE.equals(event.getKey())) {
+			applyTraceConfig();
+			return;
+		}
+		if (!AgentServerConfig.KEY_TOKEN.equals(event.getKey())) {
 			return;
 		}
 		String value = event.getNewValue();
 		if (value == null || value.isEmpty()) {
 			log.warn("Agent server auth token was cleared; regenerating to keep auth enforced");
-			writeTokenFile(ensureAuthToken());
-			return;
+			value = ensureAuthToken();
 		}
-		writeTokenFile(value);
+		if (ownsTokenFile) {
+			writeTokenFile(value);
+		}
+	}
+
+	private void applyTraceConfig() {
+		Path traceFile = Paths.get(System.getProperty("user.home"), ".runelite", "agent-trace.jsonl");
+		if (config.traceRequests()) {
+			AgentTrace.setFile(traceFile);
+		} else {
+			AgentTrace.setFile(null);
+			AgentTrace.delete(traceFile);
+		}
 	}
 
 	private int ensurePort() {
@@ -291,6 +405,8 @@ public class AgentServerPlugin extends Plugin {
 
 	@Override
 	protected void shutDown() throws Exception {
+		detachErrorCapture();
+		AgentTrace.setFile(null);
 		stopStealthScheduler();
 		stopServer();
 		deleteTokenFile();
@@ -345,6 +461,10 @@ public class AgentServerPlugin extends Plugin {
 	}
 
 	private void deleteTokenFile() {
+		if (!ownsTokenFile) {
+			return;
+		}
+		ownsTokenFile = false;
 		try {
 			Path file = Paths.get(System.getProperty("user.home"), ".runelite", ".agent-token");
 			Files.deleteIfExists(file);
@@ -393,6 +513,10 @@ public class AgentServerPlugin extends Plugin {
 		if (udsServer != null) {
 			udsServer.stop();
 			udsServer = null;
+			try {
+				Files.deleteIfExists(defaultUdsSocketPath().getParent());
+			} catch (IOException ignored) {
+			}
 			log.info("Agent server stopped (UDS)");
 		}
 		if (executor != null) {

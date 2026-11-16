@@ -71,7 +71,7 @@ public class NpcHandler extends AgentHandler {
 
 		List<Map<String, Object>> serialized = npcs.stream()
 				.limit(limit)
-				.map(this::serializeNpc)
+				.map(NpcHandler::serializeNpc)
 				.collect(Collectors.toList());
 
 		Map<String, Object> response = new LinkedHashMap<>();
@@ -97,14 +97,14 @@ public class NpcHandler extends AgentHandler {
 			return;
 		}
 
-		String action = (String) body.get("action");
+		String action = getStringField(body, "action");
 		if (action == null || action.isEmpty()) {
 			sendJson(exchange, 400, errorResponse("Missing required field: action"));
 			return;
 		}
 
-		String name = (String) body.get("name");
-		Number idNum = (Number) body.get("id");
+		String name = getStringField(body, "name");
+		Integer idNum = getIntField(body, "id");
 
 		Rs2NpcModel npc = null;
 		if (name != null && !name.isEmpty()) {
@@ -133,7 +133,7 @@ public class NpcHandler extends AgentHandler {
 		sendJson(exchange, 200, response);
 	}
 
-	private Map<String, Object> serializeNpc(Rs2NpcModel npc) {
+	static Map<String, Object> serializeNpc(Rs2NpcModel npc) {
 		Map<String, Object> map = new LinkedHashMap<>();
 		map.put("id", npc.getId());
 		map.put("index", npc.getIndex());

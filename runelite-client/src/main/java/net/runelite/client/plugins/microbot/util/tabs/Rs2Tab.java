@@ -1,12 +1,15 @@
 package net.runelite.client.plugins.microbot.util.tabs;
 
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.events.VarClientIntChanged;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.VarClientID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
+import net.runelite.client.plugins.microbot.ScriptPauseController;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
@@ -20,6 +23,7 @@ import static net.runelite.client.plugins.microbot.util.Global.sleepUntil;
 @Slf4j
 public class Rs2Tab {
     private static final int TAB_SWITCH_SCRIPT = 915;
+    private static final long LIVE_TAB_READ_TIMEOUT_MS = 600;
     private static volatile InterfaceTab cachedTab = InterfaceTab.NOTHING_SELECTED;
 
     // Derived from InterfaceTab.varcIntIndex — single source of truth.
@@ -52,18 +56,38 @@ public class Rs2Tab {
         return getCurrentTab() == tab;
     }
 
+    private static InterfaceTab readCurrentTab() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Client client = Microbot.getClient();
+            if (client.getGameState() != GameState.LOGGED_IN) return cachedTab;
+            int value = client.getVarcIntValue(VarClientID.TOPLEVEL_PANEL);
+            InterfaceTab current = INDEX_TO_TAB.getOrDefault(value, InterfaceTab.NOTHING_SELECTED);
+            cachedTab = current;
+            return current;
+        }, LIVE_TAB_READ_TIMEOUT_MS).orElse(cachedTab);
+    }
+
     public static boolean switchTo(InterfaceTab tab) {
-        if (isCurrentTab(tab)) return true;
+        if (ScriptPauseController.isPaused()) return false;
+        long generation = ScriptPauseController.getGeneration();
+        if (!Microbot.isLoggedIn()) return false;
+        if (readCurrentTab() == tab) return true;
 
         if (tab == InterfaceTab.NOTHING_SELECTED && Microbot.getVarbitValue(VarbitID.RESIZABLE_STONE_ARRANGEMENT) == 0)
             return false;
 
         int varcIntIndex = tab.getVarcIntIndex();
         if (varcIntIndex != -1) {
-            Microbot.getClientThread().runOnClientThreadOptional(() -> {
-                Microbot.getClient().runScript(TAB_SWITCH_SCRIPT, varcIntIndex);
+            boolean scriptRan = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                if (ScriptPauseController.isPaused() || generation != ScriptPauseController.getGeneration()) return false;
+                Client client = Microbot.getClient();
+                if (client.getGameState() != GameState.LOGGED_IN || client.getTopLevelInterfaceId() == -1) {
+                    return false;
+                }
+                client.runScript(TAB_SWITCH_SCRIPT, varcIntIndex);
                 return true;
-            });
+            }).orElse(false);
+            if (!scriptRan) return false;
         } else {
             int hotkey = tab.getHotkey();
             if (hotkey == -1) {
@@ -73,7 +97,7 @@ public class Rs2Tab {
             Rs2Keyboard.keyPress(hotkey);
         }
 
-        return sleepUntil(() -> isCurrentTab(tab));
+        return sleepUntil(() -> readCurrentTab() == tab);
     }
 
     @Deprecated(since = "Use switchTo")

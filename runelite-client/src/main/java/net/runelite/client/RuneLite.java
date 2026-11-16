@@ -77,16 +77,19 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.client.account.SessionManager;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.config.RuneLiteConfig;
 import net.runelite.client.discord.DiscordService;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.externalplugins.MicrobotPluginManager;
+import net.runelite.client.plugins.microbot.recovery.RecoveryPrompt;
+import net.runelite.client.plugins.microbot.recovery.StartupRecovery;
+import net.runelite.client.plugins.microbot.util.security.JagexCredentials;
 import net.runelite.client.proxy.ProxyChecker;
 import net.runelite.client.proxy.ProxyConfiguration;
 import net.runelite.client.rs.ClientLoader;
-import net.runelite.client.rs.InjectedClientRuntime;
 import net.runelite.client.rs.auth.Account;
 import net.runelite.client.rs.auth.JagexAuthService;
 import net.runelite.client.rs.auth.Session;
@@ -190,9 +193,6 @@ public class RuneLite
 	private Client client;
 
 	@Inject
-	private InjectedClientRuntime injectedClientRuntime;
-
-	@Inject
 	@Nullable
 	private RuntimeConfig runtimeConfig;
 
@@ -214,10 +214,9 @@ public class RuneLite
 	@Inject
 	private JagexAuthService jagexAuthService;
 
-	public static void main(String[] args) throws Exception
-	{
-		validateJavaVersion();
-		Locale.setDefault(Locale.ENGLISH);
+	public static void main(String[] args) throws Exception {
+        validateJavaVersion();
+        Locale.setDefault(Locale.ENGLISH);
 
 		final OptionParser parser = new OptionParser(false);
         parser.accepts("clean-jagex-launcher", "Enable jagex launcher"); // will remove the credentials.properties file in .runelite folder
@@ -326,6 +325,9 @@ public class RuneLite
 
 
 
+		final boolean safeMode = StartupRecovery.install(RUNELITE_DIR, RuneLiteProperties.getMicrobotVersion(),
+			options.has("safe-mode"), RecoveryPrompt.isEnabled(), new RecoveryPrompt()).isSafeMode();
+
 		SplashScreen.stage(0, "Preparing RuneScape", "");
 
 		boolean startupFailed = false;
@@ -372,7 +374,7 @@ public class RuneLite
 				clientLoader,
 				runtimeConfigLoader,
 				developerMode,
-				options.has("safe-mode"),
+				safeMode,
 				options.has("disable-telemetry"),
 				options.has("disable-walker-update"),
 				options.valueOf(sessionfile),
@@ -392,6 +394,7 @@ public class RuneLite
 		{
 			startupFailed = true;
 			log.error("Failure during startup", e);
+			StartupRecovery.startupFailed(e);
 			final String crashSummary = CrashReportFormatter.summarize(e);
 			final String crashDetails = CrashReportFormatter.buildReport(e);
 			SwingUtilities.invokeLater(() ->
@@ -485,7 +488,8 @@ public class RuneLite
 		System.setProperty("jagex.disableBouncyCastle", "true");
 		System.setProperty("jagex.userhome", RUNELITE_DIR.getAbsolutePath());
 
-		injectedClientRuntime.initialize();
+		// Start the applet
+		client.initialize();
 
 		SplashScreen.stage(.57, null, "Loading configuration");
 
@@ -494,6 +498,13 @@ public class RuneLite
 
 		// Load user configuration
 		configManager.load();
+		JagexCredentials.fromLaunch();
+
+		for (String plugin : StartupRecovery.takePendingDisables())
+		{
+			configManager.setConfiguration(RuneLiteConfig.GROUP_NAME, plugin, false);
+			log.info("Startup recovery disabled plugin {}", plugin);
+		}
 
 		// Initialize MicrobotPluginManager after configManager is loaded
 		microbotPluginManager.init();

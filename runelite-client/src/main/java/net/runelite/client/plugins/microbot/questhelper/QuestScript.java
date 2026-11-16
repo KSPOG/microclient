@@ -8,6 +8,7 @@ import net.runelite.api.widgets.ComponentID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
+import net.runelite.client.plugins.microbot.agentserver.handler.ScriptHeartbeatRegistry;
 import net.runelite.client.plugins.microbot.api.tileobject.models.TileObjectType;
 import net.runelite.client.plugins.microbot.questhelper.logic.PiratesTreasure;
 import net.runelite.client.plugins.microbot.questhelper.logic.QuestRegistry;
@@ -18,7 +19,6 @@ import net.runelite.client.plugins.microbot.questhelper.requirements.Requirement
 import net.runelite.client.plugins.microbot.questhelper.requirements.item.ItemRequirement;
 import net.runelite.client.plugins.microbot.questhelper.steps.*;
 import net.runelite.client.plugins.microbot.questhelper.steps.widget.WidgetHighlight;
-import net.runelite.client.plugins.microbot.shortestpath.ShortestPathPlugin;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
 import net.runelite.client.plugins.microbot.util.combat.Rs2Combat;
@@ -33,7 +33,9 @@ import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.shop.Rs2Shop;
 import net.runelite.client.plugins.microbot.util.tile.Rs2Tile;
+import net.runelite.client.plugins.microbot.util.walker.Rs2PathApi;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
+import net.runelite.client.plugins.microbot.util.walker.WalkerState;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 import net.runelite.client.plugins.microbot.api.npc.models.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.api.tileobject.Rs2TileObjectQueryable;
@@ -44,6 +46,7 @@ import net.runelite.client.plugins.microbot.api.tileitem.models.Rs2TileItemModel
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -53,6 +56,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
@@ -60,7 +65,7 @@ import org.slf4j.event.Level;
 import net.runelite.api.coords.WorldArea;
 
 public class QuestScript extends Script {
-    public static double version = 0.3;
+    public static double version = 0.6;
 
     private static final long MISSING_REQUIREMENT_NOTIFY_INTERVAL_MS = 10_000L;
     private static final Map<Integer, Long> lastMissingRequirementNotice = new HashMap<>();
@@ -89,6 +94,15 @@ public class QuestScript extends Script {
 
     QuestStep dialogueStartedStep = null;
 
+    private final MultiNpcTargetTracker multiNpcTarget = new MultiNpcTargetTracker();
+
+    static final String RELOCATION_WAIT_STATUS = "Quest helper: the game moved you, waiting up to "
+            + DialogueRelocationGuard.MAX_HOLD_MS / 1000
+            + " seconds in case a cutscene is playing, then continuing";
+    private final DialogueRelocationGuard dialogueRelocation = new DialogueRelocationGuard();
+
+    private final AtomicReference<Thread> iterationThread = new AtomicReference<>();
+
     /**
      * Epoch millis at which the post-dialogue cooldown expires. While
      * {@code System.currentTimeMillis() < dialogueCooldownEndsAt}, the main tick
@@ -98,6 +112,26 @@ public class QuestScript extends Script {
      */
     private long dialogueCooldownEndsAt = 0;
 
+    private static final long OPTION_SELECTION_PENDING_LIMIT_MS = 5_000L;
+    private static final long OPTION_SELECTION_PENDING_GAP_MS = 3_000L;
+    private static final long OPTION_PRESS_SETTLE_MS = 1_800L;
+    private static final String OPTION_SELECTION_WAIT_STATUS = "Quest helper: waiting for the dialogue option to be accepted";
+    private long optionPressedAt = 0;
+    private long optionSelectionPendingSince = 0;
+    private long optionSelectionPendingSeenAt = 0;
+
+    private static final int UNHANDLED_OPTION_DISMISS_LIMIT = 3;
+    private static final long UNHANDLED_OPTION_QUIET_RESET_MS = 60_000L;
+    private static final String OPTION_CHOICE_NEEDED_STATUS = "Quest helper: paused, I don't know which dialogue option to pick here. Choose it yourself (see the step text in the Quest Helper panel) and I will continue.";
+    private static final String OPTION_RETRY_STATUS_PREFIX = "Quest helper: no matching dialogue option, retrying (";
+    private static final String OPTION_CONTINUING_STATUS = "Quest helper: continuing";
+    private static final int UNHANDLED_OPTION_CLOSE_WAIT_MS = 1_800;
+    private volatile Object unhandledOptionStep;
+    private volatile int unhandledOptionDismissals = 0;
+    private volatile long unhandledOptionSeenAt = 0;
+    private volatile boolean unhandledOptionHeld = false;
+    private volatile boolean unhandledOptionNoticeSent = false;
+
 
 
     public boolean run(QuestHelperConfig config, QuestHelperPlugin mQuestPlugin) {
@@ -105,7 +139,7 @@ public class QuestScript extends Script {
         this.mQuestPlugin = mQuestPlugin;
 
 
-        mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
+        Runnable iteration = () -> {
             try {
                 if (!config.startStopQuestHelper()) return;
                 if (!Microbot.isLoggedIn()) return;
@@ -119,6 +153,9 @@ public class QuestScript extends Script {
 
                 if (Rs2Dialogue.isInDialogue() && dialogueStartedStep == null)
                     dialogueStartedStep = questStep;
+
+                if (Rs2Dialogue.isInDialogue())
+                    noteDialogueAt(Rs2Player.getWorldLocation(), System.currentTimeMillis());
 
                 if (questStep != null && Rs2Widget.isWidgetVisible(ComponentID.DIALOG_OPTION_OPTIONS)) {
                     var dialogOptions = Rs2Widget.getWidget(ComponentID.DIALOG_OPTION_OPTIONS);
@@ -134,6 +171,7 @@ public class QuestScript extends Script {
                         for (var dialogChoice : dialogChoices) {
                             if (dialogChoice.getText().endsWith(choice.getChoice())) {
                                 Rs2Keyboard.keyPress(dialogChoice.getOnKeyListener()[7].toString().charAt(0));
+                                noteOptionPressed(System.currentTimeMillis());
                                 return;
                             }
                         }
@@ -161,7 +199,8 @@ public class QuestScript extends Script {
                                     Rs2Widget.clickWidget(widgetHighlight.getNameToCheckFor());
                                 } else {
                                     Rs2Widget.clickWidget(widget.getId());
-                                    if (Rs2Shop.isOpen() && getQuestHelperPlugin().getSelectedQuest().getQuest().getId() == Quest.PIRATES_TREASURE.getId()) {
+                                    int shopQuestId = getQuestHelperPlugin().getSelectedQuest().getQuest().getId();
+                                    if (Rs2Shop.isOpen() && (shopQuestId == Quest.PIRATES_TREASURE.getId() || shopQuestId == Quest.TAI_BWO_WANNAI_TRIO.getId())) {
                                         Rs2Shop.buyItemOptimally("karamjan rum", 1);
                                     }
                                 }
@@ -184,35 +223,55 @@ public class QuestScript extends Script {
                     }
                 }
 
-                if (getQuestHelperPlugin().getSelectedQuest() != null && !Microbot.getClientThread().runOnClientThreadOptional(() ->
-                        getQuestHelperPlugin().getSelectedQuest().isCompleted()).orElse(null)) {
-                    if (Rs2Widget.isWidgetVisible(ComponentID.DIALOG_OPTION_OPTIONS) && getQuestHelperPlugin().getSelectedQuest().getQuest().getId() != Quest.COOKS_ASSISTANT.getId() && !Rs2Bank.isOpen()) {
+                QuestHelper selectedQuest = getQuestHelperPlugin().getSelectedQuest();
+                if (selectedQuest != null && !Microbot.getClientThread().runOnClientThreadOptional(selectedQuest::isCompleted).orElse(true)) {
+                    if (Rs2Widget.isWidgetVisible(ComponentID.DIALOG_OPTION_OPTIONS) && selectedQuest.getQuest().getId() != Quest.COOKS_ASSISTANT.getId() && !Rs2Bank.isOpen()) {
                         boolean hasOption = Rs2Dialogue.handleQuestOptionDialogueSelection();
                         //if there is no quest option in the dialogue, just click player location to remove
                         // the dialogue to avoid getting stuck in an infinite loop of dialogues
-                        if (!hasOption) {
-                            if (Rs2Dialogue.acceptQuestStartDialogue()) {
+                        if (hasOption) {
+                            noteOptionPressed(System.currentTimeMillis());
+                        } else {
+                            if (isAwaitingOptionSelection(Rs2Dialogue.isOptionSelectionPending(), System.currentTimeMillis())) {
+                                Microbot.status = OPTION_SELECTION_WAIT_STATUS;
                                 return;
                             }
-                            if (getQuestHelperPlugin().getSelectedQuest() != null &&
-                                    getQuestHelperPlugin().getSelectedQuest().getQuest().getId() == Quest.IMP_CATCHER.getId()
+                            if (Rs2Dialogue.acceptQuestStartDialogue()) {
+                                noteOptionPressed(System.currentTimeMillis());
+                                return;
+                            }
+                            if (selectedQuest != null &&
+                                    selectedQuest.getQuest().getId() == Quest.IMP_CATCHER.getId()
                                     && Microbot.getClient().getTopLevelWorldView().getPlane() == 1) {
                                 Rs2Dialogue.keyPressForDialogueOption(1); // presses option 1
                                 sleep(1200,1800);
+                            } else {
+                                if (!allowUnhandledOptionDismiss(questStep, System.currentTimeMillis())) {
+                                    Microbot.status = OPTION_CHOICE_NEEDED_STATUS;
+                                    if (takeUnhandledOptionNotice()) {
+                                        Microbot.log(unhandledOptionNotice(questStep), Level.WARN);
+                                    }
+                                    return;
+                                }
+                                Microbot.status = unhandledOptionRetryStatus();
                             }
                             Rs2Walker.walkFastCanvas(Rs2Player.getWorldLocation());
+                            sleepUntil(() -> !Rs2Widget.isWidgetVisible(ComponentID.DIALOG_OPTION_OPTIONS), UNHANDLED_OPTION_CLOSE_WAIT_MS);
                         }
                         return;
                     }
 
-                    if (getQuestHelperPlugin().getSelectedQuest() != null &&
-                            getQuestHelperPlugin().getSelectedQuest().getQuest().getId() == Quest.COOKS_ASSISTANT.getId() &&
+                    optionSelectionPendingSince = 0;
+                    noteOptionDialogueClosed();
+
+                    if (selectedQuest != null &&
+                            selectedQuest.getQuest().getId() == Quest.COOKS_ASSISTANT.getId() &&
                             Rs2Dialogue.isInDialogue()) {
                         dialogueStartedStep = questStep;  // Force this to be true for Cook's Assistant
                     }
 
-                    if (getQuestHelperPlugin().getSelectedQuest() != null &&
-                            getQuestHelperPlugin().getSelectedQuest().getQuest().getId() == Quest.PIRATES_TREASURE.getId() &&
+                    if (selectedQuest != null &&
+                            selectedQuest.getQuest().getId() == Quest.PIRATES_TREASURE.getId() &&
                             Rs2Dialogue.isInDialogue()) {
                         dialogueStartedStep = questStep;
                     }
@@ -224,6 +283,7 @@ public class QuestScript extends Script {
                     } else {
                         if (dialogueStartedStep != null) {
                             dialogueCooldownEndsAt = System.currentTimeMillis() + Rs2Random.between(4000, 7000);
+                            multiNpcTarget.release();
                         }
                         dialogueStartedStep = null;
                     }
@@ -234,8 +294,12 @@ public class QuestScript extends Script {
 
                     boolean isInCutscene = Microbot.getVarbitValue(4606) > 0;
                     if (isInCutscene) {
-                        if (ShortestPathPlugin.getMarker() != null)
-                            ShortestPathPlugin.exit();
+                        if (Rs2PathApi.getMarker() != null)
+                            Rs2PathApi.exit();
+                        return;
+                    }
+
+                    if (holdForDialogueRelocation(Rs2Player.getWorldLocation(), stepWorldPoint(questStep), System.currentTimeMillis())) {
                         return;
                     }
 
@@ -253,7 +317,7 @@ public class QuestScript extends Script {
 					 * If we do not prioritize this, the script will think we are missing items
 					 */
 					if (questStep instanceof DetailedQuestStep && !(questStep instanceof NpcStep || questStep instanceof ObjectStep || questStep instanceof DigStep)) {
-                        boolean result = applyDetailedQuestStep((DetailedQuestStep) getQuestHelperPlugin().getSelectedQuest().getCurrentStep().getActiveStep());
+                        boolean result = applyDetailedQuestStep((DetailedQuestStep) selectedQuest.getCurrentStep().getActiveStep());
                         if (result) {
                             sleepUntil(() -> Rs2Player.isInteracting() || Rs2Player.isMoving() || Rs2Player.isAnimating() || Rs2Dialogue.isInDialogue(), 500);
                             sleepUntil(() -> !Rs2Player.isInteracting() && !Rs2Player.isMoving() && !Rs2Player.isAnimating());
@@ -261,17 +325,17 @@ public class QuestScript extends Script {
                         }
                     }
 
-                    if (getQuestHelperPlugin().getSelectedQuest().getCurrentStep() instanceof ConditionalStep) {
-                        QuestStep conditionalStep = getQuestHelperPlugin().getSelectedQuest().getCurrentStep().getActiveStep();
+                    if (selectedQuest.getCurrentStep() instanceof ConditionalStep) {
+                        QuestStep conditionalStep = selectedQuest.getCurrentStep().getActiveStep();
                         applyStep(conditionalStep);
-                    } else if (getQuestHelperPlugin().getSelectedQuest().getCurrentStep() instanceof NpcStep) {
-                        applyNpcStep((NpcStep) getQuestHelperPlugin().getSelectedQuest().getCurrentStep());
-                    } else if (getQuestHelperPlugin().getSelectedQuest().getCurrentStep() instanceof ObjectStep) {
-                        applyObjectStep((ObjectStep) getQuestHelperPlugin().getSelectedQuest().getCurrentStep());
-                    } else if (getQuestHelperPlugin().getSelectedQuest().getCurrentStep() instanceof DigStep) {
-                        applyDigStep((DigStep) getQuestHelperPlugin().getSelectedQuest().getCurrentStep());
-                    } else if (getQuestHelperPlugin().getSelectedQuest().getCurrentStep() instanceof PuzzleStep) {
-                        applyPuzzleStep((PuzzleStep) getQuestHelperPlugin().getSelectedQuest().getCurrentStep());
+                    } else if (selectedQuest.getCurrentStep() instanceof NpcStep) {
+                        applyNpcStep((NpcStep) selectedQuest.getCurrentStep());
+                    } else if (selectedQuest.getCurrentStep() instanceof ObjectStep) {
+                        applyObjectStep((ObjectStep) selectedQuest.getCurrentStep());
+                    } else if (selectedQuest.getCurrentStep() instanceof DigStep) {
+                        applyDigStep((DigStep) selectedQuest.getCurrentStep());
+                    } else if (selectedQuest.getCurrentStep() instanceof PuzzleStep) {
+                        applyPuzzleStep((PuzzleStep) selectedQuest.getCurrentStep());
                     }
 
                     sleepUntil(() -> Rs2Player.isInteracting() || Rs2Player.isMoving() || Rs2Player.isAnimating() || Rs2Dialogue.isInDialogue(), 500);
@@ -282,8 +346,145 @@ public class QuestScript extends Script {
                 System.out.println(ex.getMessage());
                 ex.printStackTrace(System.out);
             }
-        }, 0, Rs2Random.between(400, 1000), TimeUnit.MILLISECONDS);
+        };
+        mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> runTracked(iteration), 0, Rs2Random.between(400, 1000), TimeUnit.MILLISECONDS);
         return true;
+    }
+
+    void noteOptionPressed(long now) {
+        optionPressedAt = now;
+        optionSelectionPendingSince = 0;
+        resetUnhandledOptionDismissals();
+        String status = Microbot.status;
+        if (status != null && status.startsWith(OPTION_RETRY_STATUS_PREFIX)) {
+            Microbot.status = OPTION_CONTINUING_STATUS;
+        }
+    }
+
+    boolean allowUnhandledOptionDismiss(Object step, long now) {
+        if (step != unhandledOptionStep || now - unhandledOptionSeenAt > UNHANDLED_OPTION_QUIET_RESET_MS) {
+            unhandledOptionStep = step;
+            resetUnhandledOptionDismissals();
+        }
+        unhandledOptionSeenAt = now;
+        if (unhandledOptionDismissals >= UNHANDLED_OPTION_DISMISS_LIMIT) {
+            unhandledOptionHeld = true;
+            return false;
+        }
+        unhandledOptionDismissals++;
+        return true;
+    }
+
+    void noteOptionDialogueClosed() {
+        if (unhandledOptionHeld) {
+            resetUnhandledOptionDismissals();
+            if (OPTION_CHOICE_NEEDED_STATUS.equals(Microbot.status)) {
+                Microbot.status = OPTION_CONTINUING_STATUS;
+            }
+        }
+    }
+
+    String unhandledOptionRetryStatus() {
+        return OPTION_RETRY_STATUS_PREFIX + unhandledOptionDismissals + "/" + UNHANDLED_OPTION_DISMISS_LIMIT + ")";
+    }
+
+    boolean takeUnhandledOptionNotice() {
+        if (unhandledOptionNoticeSent) {
+            return false;
+        }
+        unhandledOptionNoticeSent = true;
+        return true;
+    }
+
+    private void resetUnhandledOptionDismissals() {
+        unhandledOptionDismissals = 0;
+        unhandledOptionHeld = false;
+        unhandledOptionNoticeSent = false;
+    }
+
+    static String unhandledOptionNotice(QuestStep step) {
+        List<String> text = step == null ? null : step.getText();
+        String name = text == null || text.isEmpty() ? "the current step" : text.get(0);
+        return "Quest helper: paused, pick the dialogue option yourself and it will continue. It does not know which option to pick for: " + name;
+    }
+
+    boolean isAwaitingOptionSelection(boolean pending, long now) {
+        if (optionPressedAt != 0 && now - optionPressedAt < OPTION_PRESS_SETTLE_MS) {
+            return true;
+        }
+        if (!pending) {
+            optionSelectionPendingSince = 0;
+            return false;
+        }
+        if (optionSelectionPendingSince == 0 || now - optionSelectionPendingSeenAt > OPTION_SELECTION_PENDING_GAP_MS) {
+            optionSelectionPendingSince = now;
+        }
+        optionSelectionPendingSeenAt = now;
+        return now - optionSelectionPendingSince < OPTION_SELECTION_PENDING_LIMIT_MS;
+    }
+
+    void noteDialogueAt(WorldPoint position, long now) {
+        dialogueRelocation.noteDialogue(position, now);
+    }
+
+    boolean holdForDialogueRelocation(WorldPoint position, WorldPoint target, long now) {
+        if (dialogueRelocation.shouldHold(position, target, now)) {
+            Microbot.status = RELOCATION_WAIT_STATUS;
+            return true;
+        }
+        clearRelocationWaitStatus();
+        return false;
+    }
+
+    private void clearRelocationWaitStatus() {
+        if (RELOCATION_WAIT_STATUS.equals(Microbot.status)) {
+            Microbot.status = OPTION_CONTINUING_STATUS;
+        }
+    }
+
+    static WorldPoint stepWorldPoint(QuestStep step) {
+        if (!(step instanceof DetailedQuestStep)) {
+            return null;
+        }
+        var definedPoint = ((DetailedQuestStep) step).getDefinedPoint();
+        return definedPoint == null ? null : definedPoint.getWorldPoint();
+    }
+
+    void runTracked(Runnable iteration) {
+        Thread current = Thread.currentThread();
+        iterationThread.set(current);
+        try {
+            iteration.run();
+        } finally {
+            iterationThread.compareAndSet(current, null);
+        }
+    }
+
+    public void cancelInFlightIteration() {
+        Thread thread = iterationThread.get();
+        if (thread != null) {
+            thread.interrupt();
+        }
+    }
+
+    boolean isIterationCancelled() {
+        return Thread.currentThread().isInterrupted() || (config != null && !config.startStopQuestHelper());
+    }
+
+    public void stopLoop() {
+        if (mainScheduledFuture != null) {
+            mainScheduledFuture.cancel(true);
+        }
+        if (config != null && config.startStopQuestHelper()) {
+            Rs2Walker.clearWalkingRoute("quest-helper:plugin-stop");
+        }
+        ScriptHeartbeatRegistry.remove(getClass().getName());
+        multiNpcTarget.release();
+        dialogueRelocation.reset();
+        clearRelocationWaitStatus();
+        unhandledOptionStep = null;
+        resetUnhandledOptionDismissals();
+        reset();
     }
 
 	private boolean handleRequirements(DetailedQuestStep questStep) {
@@ -404,6 +605,10 @@ public class QuestScript extends Script {
 			}
 		}
 
+		if (isIterationCancelled()) {
+			return true;
+		}
+
 		List<ItemRequirement> fromBank = new ArrayList<>();
 		Map<ItemRequirement, Integer> bankWithdrawId = new HashMap<>();
 		List<ItemRequirement> toBuy = new ArrayList<>();
@@ -441,6 +646,13 @@ public class QuestScript extends Script {
 		Map<ItemRequirement, Integer> buyPrimaryIds = new HashMap<>();
 
 		for (ItemRequirement ir : toBuy) {
+			if (isCoinsRequirement(ir.getAllIds())) {
+				Rs2Bank.closeBank();
+				stopQuesterWithReason(String.format(
+						"Not enough coins for this quest step (need %,d gp in total)", ir.getQuantity()), Level.WARN);
+				return true;
+			}
+
 			int primaryId = tradablePrimaryId(ir);
 			if (primaryId == -1) {
 				Rs2Bank.closeBank();
@@ -448,10 +660,19 @@ public class QuestScript extends Script {
 				return true;
 			}
 
+			if (isMembersItem(primaryId) && !isOnMembersWorld()) {
+				Rs2Bank.closeBank();
+				stopQuesterWithReason(ir.getName()
+						+ " is members-only and can't be bought on the Grand Exchange from a free-to-play world.", Level.WARN);
+				return true;
+			}
+
 			int basePrice = fetchInstabuyReferencePrice(primaryId);
 			if (basePrice <= 0) {
 				Rs2Bank.closeBank();
-				stopQuesterWithReason("Failed to fetch Grand Exchange price for: " + ir.getName());
+				stopQuesterWithReason("No Grand Exchange price for " + ir.getName()
+						+ ": it isn't sold on the Grand Exchange, or the price service is unreachable. Get it in-game and restart.",
+						Level.WARN);
 				return true;
 			}
 
@@ -471,18 +692,41 @@ public class QuestScript extends Script {
 			Rs2Bank.closeBank();
 			stopQuesterWithReason(String.format(
 					"Not enough gp to buy missing quest items (need %,d gp, have %,d gp)",
-					totalBuyCost, availableGp));
+					totalBuyCost, availableGp), Level.WARN);
 			return true;
 		}
 
 		if (!toBuy.isEmpty()) {
 			int freeSlots = Rs2GrandExchange.getAvailableSlotsCount();
-			if (freeSlots < toBuy.size()) {
+			if (freeSlots <= 0) {
 				Rs2Bank.closeBank();
-				stopQuesterWithReason(String.format(
-						"Not enough free Grand Exchange slots for missing quest items (need %d, have %d)",
-						toBuy.size(), freeSlots));
+				if (Rs2GrandExchange.hasBoughtOffer()) {
+					Microbot.status = "Quest helper: collecting finished Grand Exchange offers";
+					Rs2GrandExchange.walkToGrandExchange();
+					Rs2GrandExchange.openExchange();
+					sleepUntil(Rs2GrandExchange::isOpen, 15_000);
+					if (Rs2GrandExchange.isOpen()) {
+						collectPurchasedItemsViaBank(missing);
+						if (Rs2GrandExchange.getAvailableSlotsCount() <= 0) {
+							stopQuesterWithReason(
+									"Could not collect finished Grand Exchange offers (bank full?). Collect them manually and restart.");
+						}
+					}
+					return true;
+				}
+				stopQuesterWithReason(
+						"No free Grand Exchange slots for missing quest items. Free a slot and restart.", Level.WARN);
 				return true;
+			}
+			int missingCount = toBuy.size();
+			if (trimToGrandExchangeSlots(toBuy, freeSlots)) {
+				Microbot.log(String.format(
+						"Quest helper: %d missing quest items but only %d free Grand Exchange slots; buying %d now and the rest afterwards",
+						missingCount, freeSlots, toBuy.size()), Level.INFO);
+				totalBuyCost = 0L;
+				for (ItemRequirement ir : toBuy) {
+					totalBuyCost += (long) offerPrices.get(ir) * buyQuantities.get(ir);
+				}
 			}
 		}
 
@@ -492,7 +736,11 @@ public class QuestScript extends Script {
 			return true;
 		}
 
+		boolean bankWithdrawalMissed = false;
 		for (ItemRequirement ir : fromBank) {
+			if (isIterationCancelled()) {
+				return true;
+			}
 			Integer idToWithdraw = bankWithdrawId.get(ir);
 			if (idToWithdraw == null || idToWithdraw <= 0) {
 				continue;
@@ -504,9 +752,20 @@ public class QuestScript extends Script {
 			Microbot.status = "Withdrawing " + ir.getName() + " x" + qty;
 			Rs2Bank.withdrawX(idToWithdraw, qty);
 			if (!sleepUntil(() -> hasItemRequirementOnPlayer(ir), 2_000)) {
+				if (isIterationCancelled()) {
+					return true;
+				}
 				Microbot.log("Quest helper: bank withdrawal for " + ir.getName() + " did not land in time",
 						Level.WARN);
+				bankWithdrawalMissed = true;
 			}
+		}
+
+		if (bankWithdrawalMissed && Rs2Inventory.isFull()) {
+			Rs2Bank.closeBank();
+			stopQuesterWithReason("Inventory is full, so missing quest items can't be withdrawn. Free some slots and restart.",
+					Level.WARN);
+			return true;
 		}
 
 		if (!toBuy.isEmpty()) {
@@ -518,14 +777,22 @@ public class QuestScript extends Script {
 				Microbot.status = "Withdrawing " + coinsToWithdraw + " gp for Grand Exchange";
 				Rs2Bank.withdrawX(ItemID.COINS_995, coinsToWithdraw);
 				sleepUntil(() -> Rs2Inventory.itemQuantity(ItemID.COINS_995) >= requiredCoins, 3_000);
+				if (isIterationCancelled()) {
+					return true;
+				}
 			}
 
 			long invCoinsAfter = Rs2Inventory.itemQuantity(ItemID.COINS_995);
 			if (invCoinsAfter < requiredCoins) {
 				Rs2Bank.closeBank();
-				stopQuesterWithReason(String.format(
-						"Bank withdrawal failed to supply enough coins (need %,d gp, have %,d gp in inventory)",
-						requiredCoins, invCoinsAfter));
+				if (invCoinsAfter == 0 && Rs2Inventory.isFull()) {
+					stopQuesterWithReason("Inventory is full, so coins for the Grand Exchange can't be withdrawn. Free a slot and restart.",
+							Level.WARN);
+				} else {
+					stopQuesterWithReason(String.format(
+							"Bank withdrawal failed to supply enough coins (need %,d gp, have %,d gp in inventory)",
+							requiredCoins, invCoinsAfter));
+				}
 				return true;
 			}
 		}
@@ -533,7 +800,7 @@ public class QuestScript extends Script {
 		Rs2Bank.closeBank();
 		sleepUntil(() -> !Rs2Bank.isOpen(), 3_000);
 
-		if (toBuy.isEmpty()) {
+		if (toBuy.isEmpty() || isIterationCancelled()) {
 			return true;
 		}
 
@@ -549,6 +816,9 @@ public class QuestScript extends Script {
 
 		int placedOffers = 0;
 		for (ItemRequirement ir : toBuy) {
+			if (isIterationCancelled()) {
+				return true;
+			}
 			int offerPrice = offerPrices.getOrDefault(ir, 0);
 			int qty = buyQuantities.getOrDefault(ir, 0);
 			int primaryId = buyPrimaryIds.getOrDefault(ir, -1);
@@ -583,6 +853,9 @@ public class QuestScript extends Script {
 					attempt, maxBuyAttempts);
 
 			sleepUntil(() -> itemsStillBuying(toBuy, buyPrimaryIds).isEmpty(), perAttemptWaitMs);
+			if (isIterationCancelled()) {
+				return true;
+			}
 
 			List<ItemRequirement> stillPending = itemsStillBuying(toBuy, buyPrimaryIds);
 			if (stillPending.isEmpty()) {
@@ -600,6 +873,9 @@ public class QuestScript extends Script {
 			}
 
 			for (ItemRequirement ir : stillPending) {
+				if (isIterationCancelled()) {
+					return true;
+				}
 				int primaryId = buyPrimaryIds.getOrDefault(ir, -1);
 				if (primaryId == -1) {
 					continue;
@@ -619,6 +895,9 @@ public class QuestScript extends Script {
 				}
 
 				sleepUntil(() -> Rs2Inventory.itemQuantity(ItemID.COINS_995) > preAbortCoins, 3_000);
+				if (isIterationCancelled()) {
+					return true;
+				}
 
 				int alreadyOnHand = inventoryQuantityIncludingNoted(ir);
 				int qtyNeeded = Math.max(0, ir.getQuantity() - alreadyOnHand);
@@ -646,7 +925,7 @@ public class QuestScript extends Script {
 					Rs2GrandExchange.abortAllOffers(false);
 					stopQuesterWithReason(String.format(
 							"Not enough gp to retry %s at %,d gp each (need %,d, have %,d)",
-							canonicalName, newPrice, costNeeded, retryInvCoins));
+							canonicalName, newPrice, costNeeded, retryInvCoins), Level.WARN);
 					return true;
 				}
 
@@ -694,6 +973,9 @@ public class QuestScript extends Script {
 	}
 
 	private void collectPurchasedItemsViaBank(List<ItemRequirement> items) {
+		if (isIterationCancelled()) {
+			return;
+		}
 		Microbot.status = "Collecting purchased quest items to bank";
 		Rs2GrandExchange.collectAllToBank();
 		sleep(800, 1200);
@@ -707,6 +989,9 @@ public class QuestScript extends Script {
 			Microbot.status = "Opening bank to retrieve purchased quest items";
 			Rs2Bank.walkToBankAndUseBank();
 			sleepUntil(Rs2Bank::isOpen, 15_000);
+			if (isIterationCancelled()) {
+				return;
+			}
 			if (!Rs2Bank.isOpen()) {
 				Microbot.log("Quest helper: failed to open bank after Grand Exchange collection", Level.WARN);
 				return;
@@ -743,6 +1028,9 @@ public class QuestScript extends Script {
 			Microbot.status = "Withdrawing " + ir.getName() + " x" + qty;
 			Rs2Bank.withdrawX(idToWithdraw, qty);
 			if (!sleepUntil(() -> hasItemRequirementOnPlayer(ir), 2_000)) {
+				if (isIterationCancelled()) {
+					return;
+				}
 				Microbot.log("Quest helper: purchased item " + ir.getName() + " did not land in inventory after bank withdrawal",
 						Level.WARN);
 			}
@@ -797,6 +1085,22 @@ public class QuestScript extends Script {
 			}
 		}
 		return bestId;
+	}
+
+	static boolean isCoinsRequirement(Collection<Integer> itemIds) {
+		return itemIds != null && itemIds.contains(ItemID.COINS_995);
+	}
+
+	private boolean isMembersItem(int itemId) {
+		return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			ItemComposition def = Microbot.getClient().getItemDefinition(itemId);
+			return def != null && def.isMembers();
+		}).orElse(false);
+	}
+
+	private boolean isOnMembersWorld() {
+		return Microbot.getClientThread().runOnClientThreadOptional(
+				() -> Microbot.getClient().getWorldType().contains(WorldType.MEMBERS)).orElse(true);
 	}
 
 	private int remainingQuantityNeeded(ItemRequirement itemRequirement) {
@@ -1171,8 +1475,15 @@ public class QuestScript extends Script {
 	}
 
 	private void stopQuesterWithReason(String reason) {
+		stopQuesterWithReason(reason, Level.ERROR);
+	}
+
+	void stopQuesterWithReason(String reason, Level level) {
+		if (isIterationCancelled()) {
+			return;
+		}
 		Microbot.status = reason;
-		Microbot.log("Quest helper stopped: " + reason, Level.ERROR);
+		Microbot.log("Quest helper stopped: " + reason, level);
 		if (Microbot.getConfigManager() != null) {
 			Microbot.getConfigManager().setConfiguration(
 					QuestHelperConfig.QUEST_HELPER_GROUP, "TurnOn", false);
@@ -1246,6 +1557,7 @@ public class QuestScript extends Script {
 	@Override
 	public void shutdown() {
 		super.shutdown();
+		multiNpcTarget.release();
 		reset();
 	}
 
@@ -1286,18 +1598,18 @@ public class QuestScript extends Script {
         Rs2NpcModel npc = npcs.stream().findFirst().orElse(null);
 
         if (step.isAllowMultipleHighlights()) {
-            npc = npcs.stream()
-                    .filter(x -> !npcsHandled.contains(x.getIndex()))
-                    .findFirst()
-                    .orElseGet(() -> npcs.stream()
-                            .min(Comparator.comparing(x -> Rs2Player.getWorldLocation().distanceTo(x.getWorldLocation())))
-                            .orElse(null));
+            npc = multiNpcTarget.select(step, npcs, Rs2NpcModel::getIndex, npcsHandled,
+                    Comparator.comparing(x -> Rs2Player.getWorldLocation().distanceTo(x.getWorldLocation())),
+                    System.currentTimeMillis());
         }
 
         // canReach() pathfinds through closed doors (the walker opens them en route), so canReach==true
         // doesn't mean a direct click will succeed. Require line-of-sight too, or we walk instead.
         if (npc != null && npc.getLocalLocation() != null && Rs2Camera.isTileOnScreen(npc.getLocalLocation())
                 && (Microbot.getClient().isInInstancedRegion() || (Rs2Walker.canReach(npc.getWorldLocation()) && npc.hasLineOfSight()))) {
+            if (isIterationCancelled()) {
+                return false;
+            }
             Rs2Walker.clearWalkingRoute("quest-helper:npc-step-visible-interact");
 
             if (step.getText().stream().anyMatch(x -> x.toLowerCase().contains("kill"))) {
@@ -1337,6 +1649,9 @@ public class QuestScript extends Script {
                 npc.click("");
             } else {
                 npc.click(chooseCorrectNPCOption(step, npc));
+                if (step.isAllowMultipleHighlights()) {
+                    multiNpcTarget.commit(step, npc.getIndex(), System.currentTimeMillis());
+                }
             }
 
             if (step.isAllowMultipleHighlights()) {
@@ -1383,13 +1698,17 @@ public class QuestScript extends Script {
                     .where(x -> x.getTileObjectType() == TileObjectType.WALL)
                     .toList();
 
-            for (var tile : Rs2Tile.getWalkableTilesAroundTile(object.getWorldLocation(), unreachableTargetCheckDist)) {
+            WorldPoint objectLocation = currentStepObjectLocation(step, object);
+            if (objectLocation == null)
+                return false;
+
+            for (var tile : Rs2Tile.getWalkableTilesAroundTile(objectLocation, unreachableTargetCheckDist)) {
                 if (tileObjects.stream().noneMatch(x -> x.getWorldLocation().equals(tile))) {
-                    if (!Rs2Walker.walkTo(tile) && ShortestPathPlugin.getPathfinder() == null)
+                    if (!Rs2Walker.walkTo(tile) && !Rs2PathApi.getActiveRouteStatus().isPresent())
                         return false;
 
-                    sleepUntil(() -> ShortestPathPlugin.getPathfinder() == null || ShortestPathPlugin.getPathfinder().isDone());
-                    if (ShortestPathPlugin.getPathfinder() == null || ShortestPathPlugin.getPathfinder().isDone()) {
+                    sleepUntil(() -> !Rs2PathApi.getActiveRouteStatus().isCalculating());
+                    if (!Rs2PathApi.getActiveRouteStatus().isCalculating()) {
                         unreachableTarget = false;
                         unreachableTargetCheckDist = 1;
                     }
@@ -1401,13 +1720,16 @@ public class QuestScript extends Script {
             return false;
         }
 
-        // Walk first when more than one tile away AND the target is either unreachable or not in line of
-        // sight. canReach() can still return true with a closed door between us; routing through the
-        // walker lets it open the door before we try to interact.
+        // Walk first when more than one tile away AND no reachable tile beside the target shares an open edge
+        // with it. The object's own tile is never the question (a boat on water or a door in a wall is never
+        // walkable), and a closed door or a wall between us still makes it unreachable, so the walker gets us
+        // to the right side before we interact.
         if (step.getDefinedPoint().getWorldPoint() != null && Rs2Player.getWorldLocation().distanceTo2D(step.getDefinedPoint().getWorldPoint()) > 1
-                && (object == null || !Rs2Walker.canReach(object.getWorldLocation()) || !hasLineOfSightToObject(object))) {
+                && (object == null || !isInteractableFromReachableTile(step, object))) {
             WorldPoint targetTile = null;
-            WorldPoint stepLocation = object == null ? step.getDefinedPoint().getWorldPoint() : object.getWorldLocation();
+            WorldPoint stepLocation = object == null ? step.getDefinedPoint().getWorldPoint() : currentStepObjectLocation(step, object);
+            if (stepLocation == null)
+                return false;
             int radius = 0;
             while (targetTile == null) {
                 if (mainScheduledFuture.isCancelled())
@@ -1422,17 +1744,22 @@ public class QuestScript extends Script {
                     targetTile = stepLocation;
             }
 
-            Rs2Walker.walkTo(targetTile, 3);
+            WalkerState walkState = Rs2Walker.walkWithState(targetTile, 3);
 
-            if (ShortestPathPlugin.getPathfinder() != null) {
-                var path = ShortestPathPlugin.getPathfinder().getPath();
-                if (path.get(path.size() - 1).distanceTo(step.getDefinedPoint().getWorldPoint()) <= 1)
+            var activeRoute = Rs2PathApi.getActiveRouteStatus();
+            if (activeRoute.isPresent()) {
+                var endpoint = activeRoute.getEndpoint();
+                if (endpoint.isPresent()
+                        && endpoint.get().distanceTo(step.getDefinedPoint().getWorldPoint()) <= 1)
                     return false;
-            } else
+            } else if (walkState == WalkerState.ARRIVED || mainScheduledFuture.isCancelled() || !hasLineOfSightToObject(object))
                 return false;
         }
 
         if (hasLineOfSightToObject(object) || object != null && (Rs2Camera.isTileOnScreen(object.getLocalLocation()) || object.getCanvasLocation() != null)) {
+            if (isIterationCancelled()) {
+                return false;
+            }
             Rs2Walker.clearWalkingRoute("quest-helper:object-step-interact");
 
             if (itemId == -1)
@@ -1447,11 +1774,30 @@ public class QuestScript extends Script {
             sleepUntil(() -> !Rs2Player.isMoving() && !Rs2Player.isAnimating());
             objectsHandeled.add(object.getHash());
         } else if (object != null) {
-            Rs2Walker.walkTo(object.getWorldLocation(), 1);
+            WorldPoint objectLocation = currentStepObjectLocation(step, object);
+            if (objectLocation != null)
+                Rs2Walker.walkTo(objectLocation, 1);
             return false;
         }
 
         return true;
+    }
+
+    static WorldPoint currentStepObjectLocation(ObjectStep step, Rs2TileObjectModel object) {
+        WorldPoint location = object.getWorldLocation();
+        return step.getObjects().contains(object.getTileObject()) ? location : null;
+    }
+
+    private static boolean isInteractableFromReachableTile(ObjectStep step, Rs2TileObjectModel object) {
+        if (object.getTileObjectType() != TileObjectType.GAME) {
+            return object.isReachable();
+        }
+        return step.getObjects().stream()
+                .filter(x -> x instanceof GameObject && x.getHash() == object.getHash())
+                .map(GameObject.class::cast)
+                .findFirst()
+                .map(Rs2Tile::isGameObjectInteractableFromReachableTile)
+                .orElse(false);
     }
 
     private boolean applyDigStep(DigStep step) {
@@ -1532,17 +1878,25 @@ public class QuestScript extends Script {
     }
 
 	private String chooseCorrectItemOption(QuestStep step, int itemId) {
-		var actions = Rs2Inventory.get(itemId).getInventoryActions();
+		return chooseItemAction(step.getText(), Rs2Inventory.get(itemId).getInventoryActions());
+	}
 
-		for (var action : actions) {
-			if (action != null && step.getText().stream().anyMatch(x -> x.toLowerCase().contains(action.toLowerCase())))
-				return action;
+	static boolean trimToGrandExchangeSlots(List<?> toBuy, int freeSlots) {
+		if (toBuy.size() <= freeSlots) {
+			return false;
 		}
+		toBuy.subList(Math.max(0, freeSlots), toBuy.size()).clear();
+		return true;
+	}
 
-		// Fallback: first non-empty inventory action (the item's default left-click).
-		for (var action : actions) {
-			if (action != null && !action.isEmpty())
-				return action;
+	static String chooseItemAction(List<String> stepText, String[] actions) {
+		if (stepText != null && actions != null) {
+			for (var action : actions) {
+				if (action == null || action.isEmpty()) continue;
+				Pattern word = Pattern.compile("(?<![a-z])" + Pattern.quote(action.toLowerCase()) + "(?![a-z])");
+				if (stepText.stream().anyMatch(x -> x != null && word.matcher(x.toLowerCase()).find()))
+					return action;
+			}
 		}
 
 		return "use";
@@ -1575,11 +1929,13 @@ public class QuestScript extends Script {
     private boolean applyDetailedQuestStep(DetailedQuestStep conditionalStep) {
         if (conditionalStep instanceof NpcStep) return false;
 
+        WorldPoint definedPoint = conditionalStep.getDefinedPoint() == null ? null : conditionalStep.getDefinedPoint().getWorldPoint();
+
         if (conditionalStep.getIconItemID() != -1
-                && conditionalStep.getDefinedPoint().getWorldPoint() != null
-                && !conditionalStep.getDefinedPoint().getWorldPoint().toWorldArea().hasLineOfSightTo(Microbot.getClient().getTopLevelWorldView(), Rs2Player.getWorldLocation())) {
-            if (Rs2Tile.areSurroundingTilesWalkable(conditionalStep.getDefinedPoint().getWorldPoint(), 1, 1)) {
-                WorldPoint nearestUnreachableWalkableTile = Rs2Tile.getNearestWalkableTileWithLineOfSight(conditionalStep.getDefinedPoint().getWorldPoint());
+                && definedPoint != null
+                && !definedPoint.toWorldArea().hasLineOfSightTo(Microbot.getClient().getTopLevelWorldView(), Rs2Player.getWorldLocation())) {
+            if (Rs2Tile.areSurroundingTilesWalkable(definedPoint, 1, 1)) {
+                WorldPoint nearestUnreachableWalkableTile = Rs2Tile.getNearestWalkableTileWithLineOfSight(definedPoint);
                 if (nearestUnreachableWalkableTile != null) {
                     return Rs2Walker.walkTo(nearestUnreachableWalkableTile, 0);
                 }
@@ -1606,11 +1962,11 @@ public class QuestScript extends Script {
 			}
 		}
 
-        if (!usingItems && conditionalStep.getDefinedPoint().getWorldPoint() != null && !Rs2Walker.walkTo(conditionalStep.getDefinedPoint().getWorldPoint()))
+        if (!usingItems && definedPoint != null && !Rs2Walker.walkTo(definedPoint))
             return true;
 
-		if (conditionalStep.getIconItemID() != -1 && conditionalStep.getDefinedPoint().getWorldPoint() != null
-				&& conditionalStep.getDefinedPoint().getWorldPoint().toWorldArea().hasLineOfSightTo(Microbot.getClient().getTopLevelWorldView(), Rs2Player.getWorldLocation())) {
+		if (conditionalStep.getIconItemID() != -1 && definedPoint != null
+				&& definedPoint.toWorldArea().hasLineOfSightTo(Microbot.getClient().getTopLevelWorldView(), Rs2Player.getWorldLocation())) {
 			if (conditionalStep.getQuestHelper().getQuest() == QuestHelperQuest.ZOGRE_FLESH_EATERS) {
 				if (conditionalStep.getIconItemID() == 4836) { // strange potion
 					lootGroundItem(ItemID.CUP_OF_TEA_4838, 20);
@@ -1624,6 +1980,9 @@ public class QuestScript extends Script {
     private boolean applyWidgetStep(WidgetStep step) {
         var widgetDetails = step.getWidgetDetails().get(0);
         var widget = Microbot.getClient().getWidget(widgetDetails.groupID, widgetDetails.childID);
+        if (widget == null) {
+            return false;
+        }
 
         if (widgetDetails.childChildID != -1) {
             var tmpWidget = widget.getChild(widgetDetails.childChildID);

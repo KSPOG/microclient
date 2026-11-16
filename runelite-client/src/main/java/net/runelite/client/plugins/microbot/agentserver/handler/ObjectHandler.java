@@ -71,7 +71,7 @@ public class ObjectHandler extends AgentHandler {
 
 		List<Map<String, Object>> serialized = objects.stream()
 				.limit(limit)
-				.map(this::serializeObject)
+				.map(ObjectHandler::serializeObject)
 				.collect(Collectors.toList());
 
 		Map<String, Object> response = new LinkedHashMap<>();
@@ -97,14 +97,14 @@ public class ObjectHandler extends AgentHandler {
 			return;
 		}
 
-		String action = (String) body.get("action");
+		String action = getStringField(body, "action");
 		if (action == null || action.isEmpty()) {
 			sendJson(exchange, 400, errorResponse("Missing required field: action"));
 			return;
 		}
 
-		String name = (String) body.get("name");
-		Number idNum = (Number) body.get("id");
+		String name = getStringField(body, "name");
+		Integer idNum = getIntField(body, "id");
 
 		Rs2TileObjectModel obj = null;
 		if (name != null && !name.isEmpty()) {
@@ -133,7 +133,7 @@ public class ObjectHandler extends AgentHandler {
 		sendJson(exchange, 200, response);
 	}
 
-	private Map<String, Object> serializeObject(Rs2TileObjectModel obj) {
+	static Map<String, Object> serializeObject(Rs2TileObjectModel obj) {
 		Map<String, Object> map = new LinkedHashMap<>();
 		map.put("id", obj.getId());
 		map.put("name", obj.getName());

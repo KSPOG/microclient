@@ -4,6 +4,7 @@ import net.runelite.client.RuneLiteProperties;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.config.TopLevelConfigPanel;
+import net.runelite.client.plugins.microbot.recovery.StartupRecovery;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -16,9 +17,13 @@ import javax.inject.Provider;
 import javax.inject.Singleton;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import lombok.extern.slf4j.Slf4j;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.util.List;
+import java.util.stream.Collectors;
 
+@Slf4j
 @Singleton
 public class MicrobotTopLevelConfigPanel extends PluginPanel {
     private final MaterialTabGroup tabGroup;
@@ -26,9 +31,12 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
     private final JPanel content;
 
     private final EventBus eventBus;
+    private final MicrobotCloudPanel cloudPanel;
+    private final MicrobotHelpMenu helpMenu;
     private final MicrobotPluginListPanel pluginListPanel;
     private final MaterialTab pluginListPanelTab;
     private final MaterialTab profilePanelTab;
+    private final MaterialTab pluginHubTab;
 
     private boolean active = false;
     private MicrobotPluginPanel current;
@@ -80,11 +88,15 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
             EventBus eventBus,
             MicrobotPluginListPanel pluginListPanel,
             MicrobotProfilePanel profilePanel,
-            Provider<MicrobotPluginHubPanel> microbotPluginHubPanelProvider
+            Provider<MicrobotPluginHubPanel> microbotPluginHubPanelProvider,
+            MicrobotCloudPanel cloudPanel,
+            MicrobotHelpMenu helpMenu
     ) {
         super(false);
 
         this.eventBus = eventBus;
+        this.cloudPanel = cloudPanel;
+        this.helpMenu = helpMenu;
 
         tabGroup = new MaterialTabGroup();
         tabGroup.setLayout(new GridLayout(1, 0, 7, 7));
@@ -107,7 +119,11 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
 
         pluginListPanelTab = addTab(pluginListPanel.getMuxer(), installedIcon, "Installed Microbot Plugins");
         profilePanelTab = addTab(profilePanel, "profile_icon.png", "Profiles");
-        addTab(microbotPluginHubPanelProvider, hubIcon, "Microbot Hub");
+        pluginHubTab = addTab(microbotPluginHubPanelProvider, hubIcon, "Microbot Hub");
+        pluginListPanel.setOpenHub(query -> {
+            microbotPluginHubPanelProvider.get().search(query);
+            tabGroup.select(pluginHubTab);
+        });
 
         tabGroup.select(pluginListPanelTab);
     }
@@ -115,14 +131,29 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
     private JPanel buildVersionFooter() {
         JPanel footer = new JPanel();
         footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
-        footer.setBorder(new EmptyBorder(4, 0, 4, 0));
+        footer.setBorder(new EmptyBorder(0, 0, 4, 0));
+        footer.add(cloudPanel);
 
         String version = RuneLiteProperties.getMicrobotVersion();
         JLabel versionLabel = new JLabel(version == null || version.isBlank() ? "microbot" : "microbot v" + version, SwingConstants.CENTER);
         versionLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         versionLabel.setFont(FontManager.getRunescapeSmallFont());
         versionLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        versionLabel.setBorder(new EmptyBorder(4, 0, 0, 0));
         footer.add(versionLabel);
+
+        if (StartupRecovery.mode().isSafeMode()) {
+            footer.add(buildSafeModeNotice());
+        }
+
+        JLabel nextStart = new JLabel("Safe mode is on for the next start", SwingConstants.CENTER);
+        nextStart.setAlignmentX(Component.CENTER_ALIGNMENT);
+        nextStart.setFont(FontManager.getRunescapeSmallFont());
+        nextStart.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+        nextStart.setBorder(new EmptyBorder(2, 6, 0, 6));
+        nextStart.setVisible(StartupRecovery.nextStartSafeMode());
+        helpMenu.onSafeModeChanged(() -> nextStart.setVisible(StartupRecovery.nextStartSafeMode()));
+        footer.add(nextStart);
 
         String proxy = ClientUI.proxyMessage;
         if (proxy != null && !proxy.isBlank()) {
@@ -134,6 +165,24 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
         }
 
         return footer;
+    }
+
+    private JLabel buildSafeModeNotice() {
+        String text = StartupRecovery.mode().isTemporary()
+                ? "<html><center>Safe mode: external plugins are off for this session. Your plugins and settings are kept. Restart to return to normal.</center></html>"
+                : "<html><center>Safe mode (--safe-mode): external plugins are off. Remove the launch option to return to normal.</center></html>";
+        JLabel label = new JLabel(text, SwingConstants.CENTER);
+        label.setAlignmentX(Component.CENTER_ALIGNMENT);
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+        label.setBorder(new EmptyBorder(2, 6, 2, 6));
+        List<String> previous = StartupRecovery.previousSessionSummary();
+        if (!previous.isEmpty()) {
+            label.setToolTipText("<html>Previous session:<br>" + previous.stream()
+                    .map(line -> line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                    .collect(Collectors.joining("<br>")) + "</html>");
+        }
+        return label;
     }
 
     private MaterialTab addTab(MicrobotPluginPanel panel, ImageIcon icon, String tooltip) {
@@ -212,12 +261,31 @@ public class MicrobotTopLevelConfigPanel extends PluginPanel {
     public void onActivate() {
         active = true;
         current.onActivate();
+        cloudPanel.setActive(true);
     }
 
     @Override
     public void onDeactivate() {
         active = false;
         current.onDeactivate();
+        cloudPanel.setActive(false);
+    }
+
+    Component getProfilesTab() {
+        return profilePanelTab;
+    }
+
+    Component getPluginHubTab() {
+        return pluginHubTab;
+    }
+
+    Component getTabContent() {
+        return content;
+    }
+
+    void showInstalledTab() {
+        tabGroup.select(pluginListPanelTab);
+        pluginListPanel.getMuxer().pushState(pluginListPanel);
     }
 
     public void openConfigurationPanel(String name) {

@@ -44,6 +44,7 @@ public class Rs2Widget {
                 widget = findWidget(text, null, exact);
             } else {
                 Widget rootWidget = getWidget(widgetId.get(), childId);
+                if (rootWidget == null) return false;
                 List<Widget> rootWidgets = new ArrayList<>();
                 rootWidgets.add(rootWidget);
                 widget = findWidget(text, rootWidgets, exact);
@@ -204,7 +205,7 @@ public class Rs2Widget {
             Widget foundWidget = null;
             if (children == null) {
                 // Search through root widgets if no specific children are provided
-                List<Widget> rootWidgets = Arrays.stream(Microbot.getClient().getWidgetRoots())
+                List<Widget> rootWidgets = Arrays.stream(widgetRoots())
                         .filter(x -> x != null && !x.isHidden()).collect(Collectors.toList());
                 for (Widget rootWidget : rootWidgets) {
                     if (rootWidget == null) continue;
@@ -234,9 +235,10 @@ public class Rs2Widget {
      * @return The widget containing the specified text, or null if no match is found.
      */
     public static Widget searchChildren(String text, Widget child, boolean exact) {
+        if (child == null) return null;
         if (matchesText(child, text, exact)) return child;
 
-        Widget[][] childGroups = {child.getChildren(), child.getNestedChildren(), child.getDynamicChildren(), child.getStaticChildren()};
+        Widget[][] childGroups = {child.getChildren(), child.getNestedChildren(), child.getDynamicChildren(), staticChildrenOf(child)};
         for (Widget[] childGroup : childGroups) {
             if (childGroup != null) {
                 for (Widget nestedChild : childGroup) {
@@ -259,8 +261,8 @@ public class Rs2Widget {
      * @return True if the widget's text or any action matches the search criteria, false otherwise.
      */
     private static boolean matchesText(Widget widget, String text, boolean exact) {
-        String cleanText = Rs2UiHelper.stripColTags(widget.getText());
-        String cleanName = Rs2UiHelper.stripColTags(widget.getName());
+        String cleanText = cleanWidgetText(widget);
+        String cleanName = cleanWidgetName(widget);
 
         if (exact) {
             if (cleanText.equalsIgnoreCase(text) || cleanName.equalsIgnoreCase(text)) return true;
@@ -282,6 +284,30 @@ public class Rs2Widget {
         return false;
     }
 
+    private static String cleanWidgetText(Widget widget) {
+        try {
+            return Rs2UiHelper.stripColTags(widget.getText());
+        } catch (NullPointerException e) {
+            return "";
+        }
+    }
+
+    private static String cleanWidgetName(Widget widget) {
+        try {
+            return Rs2UiHelper.stripColTags(widget.getName());
+        } catch (NullPointerException e) {
+            return "";
+        }
+    }
+
+    private static Widget[] staticChildrenOf(Widget widget) {
+        try {
+            return widget.getStaticChildren();
+        } catch (NullPointerException e) {
+            return null;
+        }
+    }
+
     /**
      * Searches for a widget with the specified sprite ID among root widgets or the specified child widgets.
      *
@@ -295,7 +321,7 @@ public class Rs2Widget {
 
             if (children == null) {
                 // Search through root widgets if no specific children are provided
-                List<Widget> rootWidgets = Arrays.stream(Microbot.getClient().getWidgetRoots())
+                List<Widget> rootWidgets = Arrays.stream(widgetRoots())
                         .filter(widget -> widget != null && !widget.isHidden())
                         .collect(Collectors.toList());
                 for (Widget rootWidget : rootWidgets) {
@@ -325,9 +351,10 @@ public class Rs2Widget {
      * @return The widget with the specified sprite ID, or null if not found.
      */
     public static Widget searchChildren(int spriteId, Widget child) {
+        if (child == null) return null;
         if (matchesSpriteId(child, spriteId)) return child;
 
-        Widget[][] childGroups = {child.getChildren(), child.getNestedChildren(), child.getDynamicChildren(), child.getStaticChildren()};
+        Widget[][] childGroups = {child.getChildren(), child.getNestedChildren(), child.getDynamicChildren(), staticChildrenOf(child)};
         for (Widget[] childGroup : childGroups) {
             if (childGroup != null) {
                 for (Widget nestedChild : childGroup) {
@@ -483,7 +510,9 @@ public class Rs2Widget {
 
      private static Integer getProcessingWidgetKeyCode(String actionText) {
         log.debug("Searching for processing widget with action text: {}", actionText);
-        Widget optionWidget = findWidget(actionText, List.of(getWidget(InterfaceID.SKILLMULTI, 0)), false);    
+        Widget mainWidget = getWidget(InterfaceID.SKILLMULTI, 0);
+        if (mainWidget == null) return null;
+        Widget optionWidget = findWidget(actionText, List.of(mainWidget), false);
         if (optionWidget == null) return null;
         return getProcessingWidgetKeyCode(optionWidget);
      }
@@ -525,28 +554,33 @@ public class Rs2Widget {
      * @return map of widgets to action text
      */
     public static Map<Widget, String> findWidgetsWithAction(String actionText, int widgetGroupId, int widgetSubGroupId, boolean clickWidget) {
-        Map<Widget, String> widgetActions = new HashMap<>();
-        Widget child = getWidget(widgetGroupId, widgetSubGroupId);
-        if (child == null) return widgetActions;
-        
-        List<Widget[]> childGroups = Stream.of(child.getChildren(), child.getNestedChildren(), 
-                                             child.getDynamicChildren(), child.getStaticChildren())
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-        
-        for (Widget[] childGroup : childGroups) {
-            if (childGroup != null) {
-                for (Widget nestedChild : Arrays.stream(childGroup)
-                        .filter(w -> w != null && !w.isHidden())
-                        .collect(Collectors.toList())) {
-                    if (matchesWildCardText(nestedChild, actionText, false, false)) {
-                        if (clickWidget) {
-                            clickWidget(nestedChild);
-                        }
-                        widgetActions.put(nestedChild, actionText.toLowerCase());
+        List<Widget> matches = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            List<Widget> found = new ArrayList<>();
+            Widget child = Microbot.getClient().getWidget(widgetGroupId, widgetSubGroupId);
+            if (child == null) return found;
+
+            List<Widget[]> childGroups = Stream.of(child.getChildren(), child.getNestedChildren(),
+                                                 child.getDynamicChildren(), staticChildrenOf(child))
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+
+            for (Widget[] childGroup : childGroups) {
+                for (Widget nestedChild : childGroup) {
+                    if (nestedChild != null && !nestedChild.isHidden()
+                            && matchesWildCardText(nestedChild, actionText, false, false)) {
+                        found.add(nestedChild);
                     }
                 }
             }
+            return found;
+        }).orElse(Collections.emptyList());
+
+        Map<Widget, String> widgetActions = new HashMap<>();
+        for (Widget match : matches) {
+            if (clickWidget) {
+                clickWidget(match);
+            }
+            widgetActions.put(match, actionText.toLowerCase());
         }
         return widgetActions;
     }
@@ -575,7 +609,7 @@ public class Rs2Widget {
             return false;
         }
         Widget mainWidget = getWidget(InterfaceID.SKILLMULTI, 0);
-     
+        if (mainWidget == null) return false;
 
         // enable quantity option if available
         //enableQuantityOption(widgetGroupId);
@@ -682,8 +716,10 @@ public class Rs2Widget {
      * @return true if widget exists and is visible
      */
     public static boolean hasVisibleWidgetText(String text) {
-        Widget widget = findWidget(text, null, true);
-        return widget != null && !widget.isHidden();
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Widget widget = findWidget(text, null, true);
+            return widget != null && !widget.isHidden();
+        }).orElse(false);
     }
 
     /**
@@ -818,9 +854,9 @@ public class Rs2Widget {
     private static boolean matchesWildCardText(Widget widget, String text, boolean exact, boolean onlyAction) {
         if (widget == null) return false;
         
-        String cleanText = Rs2UiHelper.stripColTags(widget.getText());
-        String cleanName = Rs2UiHelper.stripColTags(widget.getName());
-        
+        String cleanText = cleanWidgetText(widget);
+        String cleanName = cleanWidgetName(widget);
+
         if (!onlyAction) {
             if (exact) {
                 if ((cleanText != null && cleanText.equalsIgnoreCase(text)) || 
@@ -907,7 +943,8 @@ public class Rs2Widget {
 	   // Recursively check all children for nested containers
 	   List<Widget[]> childGroups = new java.util.ArrayList<>();
 	   
-	   if (widget.getStaticChildren() != null) childGroups.add(widget.getStaticChildren());
+	   Widget[] staticChildren = staticChildrenOf(widget);
+	   if (staticChildren != null) childGroups.add(staticChildren);
 	   
 
 	   for (Widget[] childGroup : childGroups) {
@@ -936,5 +973,15 @@ public class Rs2Widget {
 	   }
 	   return false;
    }
+
+    static Widget[] widgetRoots() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            try {
+                return Microbot.getClient().getWidgetRoots();
+            } catch (NullPointerException e) {
+                return null;
+            }
+        }).orElse(new Widget[0]);
+    }
 
 }

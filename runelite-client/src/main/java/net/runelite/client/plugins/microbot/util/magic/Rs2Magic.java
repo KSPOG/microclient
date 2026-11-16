@@ -23,12 +23,12 @@ import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
 import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
+import net.runelite.client.plugins.microbot.util.player.Rs2Pvp;
 import net.runelite.client.plugins.microbot.util.player.Rs2PlayerModel;
 import net.runelite.client.plugins.microbot.util.settings.Rs2SpellBookSettings;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 import net.runelite.client.plugins.skillcalculator.skills.MagicAction;
-import org.apache.commons.lang3.NotImplementedException;
 
 import java.awt.*;
 import java.awt.event.KeyEvent;
@@ -161,27 +161,32 @@ public class Rs2Magic {
             log("Unable to cast " + magicSpell.getName());
             return false;
         }
+        String[] actions = magicSpell.getActions();
         if (magicSpell.getName().toLowerCase().contains("teleport") ||
                 magicSpell.getName().toLowerCase().contains("bones to") ||
-                (magicSpell.getActions() != null && Arrays.stream(magicSpell.getActions()).anyMatch(x -> x != null && x.equalsIgnoreCase("cast")))) {
+                (actions != null && Arrays.stream(actions).anyMatch(x -> x != null && x.equalsIgnoreCase("cast")))) {
             menuAction = MenuAction.CC_OP;
         } else {
             menuAction = MenuAction.WIDGET_TARGET;
         }
 
-        if (magicSpell.getWidgetId() == -1)
-            throw new NotImplementedException("This spell has not been configured yet in the MagicAction.java class");
+        int widgetId = magicSpell.getWidgetId();
+        Widget spellWidget = widgetId == -1 ? null : Rs2Widget.getWidget(widgetId);
+        if (spellWidget == null) {
+            log("Unable to find the spell widget for " + magicSpell.getName());
+            return false;
+        }
 
         Microbot.doInvoke(new NewMenuEntry()
                 .option(option)
                 .param0(-1)
-                .param1(magicSpell.getWidgetId())
+                .param1(widgetId)
                 .opcode(menuAction.getId())
                 .identifier(identifier)
                 .itemId(-1)
                 .target(magicSpell.getName())
                 ,
-                new Rectangle(Rs2Widget.getWidget(magicSpell.getWidgetId()).getBounds()));
+                new Rectangle(spellWidget.getBounds()));
         //Rs2Reflection.invokeMenu(-1, magicSpell.getWidgetId(), menuAction.getId(), 1, -1, "Cast", "<col=00ff00>" + magicSpell.getName() + "</col>", -1, -1);
         return true;
     }
@@ -189,6 +194,25 @@ public class Rs2Magic {
 	public static boolean quickCast(Spell spell) {
 		return quickCast(spell.getMagicAction());
 	}
+
+    /**
+     * Click a zero-rune spellbook action by its exact displayed name.
+     *
+     * <p>Home teleports exist on every spellbook but only the standard-book variant is represented by
+     * {@link MagicAction}. The active spellbook and cooldown are planner requirements; at execution time
+     * the exact visible widget is the authoritative capability check.</p>
+     */
+    public static boolean quickCast(String spellName) {
+        if (spellName == null || spellName.trim().isEmpty()) return false;
+
+        Microbot.status = "Casting " + spellName;
+        if (Rs2Tab.getCurrentTab() != InterfaceTab.MAGIC) {
+            Rs2Tab.switchToMagicTab();
+            if (!sleepUntil(() -> Rs2Tab.getCurrentTab() == InterfaceTab.MAGIC)) return false;
+        }
+
+        return Rs2Widget.clickWidget(spellName, Optional.of(218), 3, true);
+    }
 
     public static boolean quickCast(MagicAction magicSpell) {
         Microbot.status = "Casting " + magicSpell.getName();
@@ -301,7 +325,8 @@ public class Rs2Magic {
     }
 
     private static void alch(MagicAction magicSpell, Rs2ItemModel item, int sleepMin, int sleepMax) {
-        final Widget spellWidget = Rs2Widget.getWidget(magicSpell.getWidgetId());
+        final int widgetId = magicSpell.getWidgetId();
+        final Widget spellWidget = widgetId == -1 ? null : Rs2Widget.getWidget(widgetId);
         if (spellWidget == null) return;
 
         final Point point = new Point((int) spellWidget.getBounds().getCenterX(), (int) spellWidget.getBounds().getCenterY());
@@ -568,7 +593,33 @@ public class Rs2Magic {
     }
 
     public static Map<Runes, Integer> getMissingRunes(Spell spell, int casts, RuneFilter runeFilter) {
-        return getMissingRunes(getRequiredRunes(spell, casts), runeFilter);
+        int sacks = 0;
+        boolean inWilderness = Rs2Pvp.isInWilderness();
+        if (inWilderness && isBlightedIceSpell(spell)) {
+            if (runeFilter.isIncludeInventory()) sacks += Rs2Inventory.itemQuantity(ItemID.BLIGHTED_SACK_ICEBARRAGE);
+            if (runeFilter.isIncludeBank()) sacks += Rs2Bank.count(ItemID.BLIGHTED_SACK_ICEBARRAGE);
+        }
+        int runeCasts = runeCastsAfterIceSacks(spell, casts, sacks, inWilderness);
+        return getMissingRunes(getRequiredRunes(spell, runeCasts), runeFilter);
+    }
+
+    static boolean isBlightedIceSpell(Spell spell) {
+        if (spell == null || spell.getMagicAction() == null) return false;
+        switch (spell.getMagicAction()) {
+            case ICE_RUSH:
+            case ICE_BURST:
+            case ICE_BLITZ:
+            case ICE_BARRAGE:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** Sacks cover one whole ice cast each; they must not be credited as generic runes. */
+    static int runeCastsAfterIceSacks(Spell spell, int casts, int sacks, boolean inWilderness) {
+        if (!inWilderness || !isBlightedIceSpell(spell)) return Math.max(0, casts);
+        return Math.max(0, casts - Math.max(0, sacks));
     }
 
     public static Map<Runes, Integer> getMissingRunes(Spell spell, int casts) {
@@ -595,7 +646,7 @@ public class Rs2Magic {
     }
 
     public static boolean hasRequiredRunes(Spell spell, int casts, RuneFilter runeFilter) {
-        return hasRequiredRunes(getRequiredRunes(spell, casts), runeFilter);
+        return getMissingRunes(spell, casts, runeFilter).isEmpty();
     }
 
     public static boolean hasRequiredRunes(Spell spell, int casts) {

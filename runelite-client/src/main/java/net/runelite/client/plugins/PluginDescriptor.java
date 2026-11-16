@@ -61,9 +61,9 @@ public @interface PluginDescriptor
 	String Maxxin = "<html>[<font color='#8B0000'>MX</font>] ";
 	String Hal = "<html>[<font color=#000000>Hal</font>] ";
 	String Funk = "<html>[<font color=#ffff1a>\uD83C\uDF19</font>] ";
-  	String Cardew = "<html>[<font color=#824BA3>CD</font>]";
+	String Cardew = "<html>[<font color=#824BA3>CD</font>]";
 	String Bolado = "<html>[<font color=#FF0000><b>\uD83D\uDE21</b></font>] ";
- 	String Choken = "<html>[<font color=#8A2BE2>\u03A9</font>] ";
+	String Choken = "<html>[<font color=#8A2BE2>\u03A9</font>] ";
 
 	String name();
 
@@ -105,7 +105,7 @@ public @interface PluginDescriptor
 	 * If this plugin should be disabled on startup. This is used for plugins that
 	 * are not needed in certain situations, like the cache debugger.
 	 */
-	boolean disableOnStartUp() default false; 
+	boolean disableOnStartUp() default false;
 	/**
 	 * disable the plugin on startup and not allow it to be enabled
 	 * This is used for plugins that are not needed in certain situations

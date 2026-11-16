@@ -20,6 +20,7 @@ import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.walker.recovery.CantReachTargetRecovery;
 import org.jetbrains.annotations.Nullable;
 
+import java.awt.Rectangle;
 import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -613,6 +614,7 @@ public class Rs2Npc {
      */
     @Deprecated(since = "1.7.2", forRemoval = true)
     public static boolean interact(NPC npc, String action) {
+        if (npc == null) return false;
         return interact(new Rs2NpcModel(npc), action);
     }
 
@@ -644,25 +646,34 @@ public class Rs2Npc {
         try {
             if (CantReachTargetRecovery.shouldStart(
                     Microbot.isCantReachTargetDetectionEnabled, Microbot.cantReachTarget)) {
+                // The game itself said "I can't reach that!" on the previous interaction — a shut
+                // door or wall sits between us and the target. The walker is the only recovery that
+                // OPENS doors, so walk to the NPC (doors handled en route) and re-click on arrival.
+                // The old branch selected a line-of-sight tile instead, which for an NPC behind a
+                // door picks tiles on the unreachable side — and its LOS "all clear" path cleared
+                // the flag without ever walking, so a through-window NPC clicked forever without
+                // escalating. LOS is deliberately not consulted: a ranged attack through a fence
+                // never prints can't-reach, so every trigger here genuinely needs adjacency.
                 if (CantReachTargetRecovery.retryExhausted(
-                        Microbot.cantReachTargetRetries, Rs2Random.between(3, 5))) {
+                        CantReachTargetRecovery.retries(), Rs2Random.between(3, 5))) {
+                    int retries = CantReachTargetRecovery.giveUp();
                     Microbot.pauseAllScripts.compareAndSet(false, true);
                     Microbot.showMessage("Your bot tried to interact with an NPC for "
-                            + Microbot.cantReachTargetRetries + " times but failed. Please take a look at what is happening.");
+                            + retries + " times but failed. Please take a look at what is happening.");
                     return false;
                 }
-                final WorldPoint npcWorldPoint = npc.getWorldLocation();
+                final WorldPoint npcWorldPoint = CantReachTargetRecovery.templateLocation(npc.getWorldLocation());
                 if (npcWorldPoint == null) {
                     log.error("Error interacting with NPC '{}' for action '{}': WorldPoint is null", npc.getName(), action);
                     return false;
                 }
-                Microbot.cantReachTargetRetries++;
+                int attempt = CantReachTargetRecovery.countAttempt();
                 log.info("[Interact] can't-reach recovery: walking to NPC '{}' at {} (attempt {})",
-                        npc.getName(), npcWorldPoint, Microbot.cantReachTargetRetries);
+                        npc.getName(), npcWorldPoint, attempt);
                 if (CantReachTargetRecovery.walkTo(npcWorldPoint, 2)) {
                     Microbot.pauseAllScripts.compareAndSet(true, false);
-                    Microbot.cantReachTarget = false;
-                    Microbot.cantReachTargetRetries = 0;
+                    CantReachTargetRecovery.reset();
+                    // fall through and click from beside it
                 } else {
                     return false;
                 }
@@ -781,6 +792,7 @@ public class Rs2Npc {
      */
     @Deprecated(since = "1.7.2", forRemoval = true)
     public static boolean interact(NPC npc) {
+        if (npc == null) return false;
         return interact(new Rs2NpcModel(npc), "");
     }
 
@@ -969,6 +981,7 @@ public class Rs2Npc {
      */
     public static boolean pickpocket(Map<NPC, HighlightedNpc> highlightedNpcs) {
         for (NPC npc : highlightedNpcs.keySet()) {
+            if (npc == null) return false;
             return interact(new Rs2NpcModel(npc), "pickpocket");
         }
         return false;
@@ -983,6 +996,7 @@ public class Rs2Npc {
      * @return {@code true} if the pickpocket action was successfully executed, {@code false} otherwise.
      */
     public static boolean pickpocket(NPC npc) {
+        if (npc == null) return false;
         return interact(npc instanceof Rs2NpcModel ? (Rs2NpcModel) npc : new Rs2NpcModel(npc), "pickpocket");
     }
 
@@ -1304,20 +1318,25 @@ public class Rs2Npc {
     public static boolean hoverOverActor(Actor actor) {
         if (!Rs2AntibanSettings.naturalMouse) {
             if (Rs2AntibanSettings.devDebug)
-                Microbot.log("Natural mouse is not enabled, can't hover");
+                Microbot.log("Hover skipped: 'Aim Clicks From Cursor' is off in Antiban > Mouse");
             return false;
         }
-        Point point = Rs2UiHelper.getClickingPoint(Rs2UiHelper.getActorClickbox(actor), true);
-        if (point.getX() == 1 && point.getY() == 1) {
+        Rectangle clickbox = Rs2UiHelper.getActorClickbox(actor);
+        if (Rs2UiHelper.isFallbackRectangle(clickbox)) {
             return false;
         }
+        Point point = Rs2UiHelper.getClickingPoint(clickbox, true);
         Microbot.getNaturalMouse().moveTo(point.getX(), point.getY());
         return true;
     }
 
     // Walks to the nearest NPC location with the given name
     public static boolean walkToNearestMonster(String name, int minClustering, boolean avoidWilderness) {
-        WorldPoint nearestNpcLocation = Rs2NpcManager.getClosestLocation(name,minClustering,avoidWilderness).getClosestToCenter();
+        MonsterLocation nearestLocation = Rs2NpcManager.getClosestLocation(name, minClustering, avoidWilderness);
+        if (nearestLocation == null) {
+            return false;
+        }
+        WorldPoint nearestNpcLocation = nearestLocation.getClosestToCenter();
         if (nearestNpcLocation == null) {
             return false;
         }

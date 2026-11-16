@@ -52,6 +52,7 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ItemSpawned;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.gameval.SpriteID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.eventbus.EventBus;
@@ -77,6 +78,9 @@ public class DetailedQuestStep extends QuestStep
 
 	@Inject
 	EventBus eventBus;
+
+	@Setter
+	protected Integer worldPointVarp = null;
 
 	@Getter
 	protected DefinedPoint definedPoint;
@@ -176,6 +180,11 @@ public class DetailedQuestStep extends QuestStep
 	public void startUp()
 	{
 		super.startUp();
+		if (worldPointVarp != null)
+		{
+			updateWorldPointFromVarpValue(client.getVarpValue(worldPointVarp));
+		}
+
 		if (definedPoint != null)
 		{
 			if (questHelper.getConfig().showWorldMapPoint())
@@ -251,6 +260,15 @@ public class DetailedQuestStep extends QuestStep
 	public void addTeleport(Requirement newTeleport)
 	{
 		teleport.add(newTeleport);
+	}
+
+	@Subscribe
+	public void onVarbitChanged(final VarbitChanged event)
+	{
+		if (worldPointVarp != null && event.getVarpId() == worldPointVarp)
+		{
+			updateWorldPointFromVarpValue(event.getValue());
+		}
 	}
 
 	@Subscribe
@@ -881,7 +899,12 @@ public class DetailedQuestStep extends QuestStep
 		{
 			return;
 		}
-		var playerWp = client.getLocalPlayer().getWorldLocation();
+		var player = client.getLocalPlayer();
+		if (player == null)
+		{
+			return;
+		}
+		var playerWp = player.getWorldLocation();
 		if (playerWp == null)
 		{
 			return;
@@ -907,7 +930,7 @@ public class DetailedQuestStep extends QuestStep
 	@Override
 	public void disableShortestPath()
 	{
-		if (definedPoint.getWorldPoint() != null && !isLineDrawn())
+		if (definedPoint != null && definedPoint.getWorldPoint() != null && !isLineDrawn())
 		{
 			eventBus.post(new PluginMessage("shortestpath", "clear"));
 		}
@@ -936,5 +959,24 @@ public class DetailedQuestStep extends QuestStep
 	public void addHighlightZone(Zone zone)
 	{
 		highlightZones.add(zone);
+	}
+
+	private void updateWorldPointFromVarpValue(int varpValue)
+	{
+		if (varpValue == -1)
+		{
+			setWorldPoint((DefinedPoint) null);
+		}
+		else
+		{
+			setWorldPoint(WorldPoint.fromCoord(varpValue));
+		}
+	}
+
+	public DetailedQuestStep cutscene()
+	{
+		var cutsceneStep = new DetailedQuestStep(getQuestHelper(), "Watch the cutscene.");
+		addSubSteps(cutsceneStep);
+		return cutsceneStep;
 	}
 }

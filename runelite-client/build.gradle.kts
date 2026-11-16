@@ -54,6 +54,26 @@ plugins {
 
 }
 
+sourceSets.named("main") {
+    java.srcDir("src/upstreamPlanner/src/main/java")
+}
+
+// The pinned upstream core loads the same reviewed collision archive from its original root path.
+// Keep one source artifact and copy it into both runtime resource namespaces during assembly.
+tasks.named<ProcessResources>("processResources") {
+    from("src/main/resources/net/runelite/client/plugins/microbot/shortestpath/collision-map.zip") {
+        into("")
+    }
+}
+
+tasks.withType<Checkstyle>().configureEach {
+    exclude("shortestpath/**")
+}
+
+tasks.withType<Pmd>().configureEach {
+    exclude("shortestpath/**")
+}
+
 // Module-system flags required to extend com.apple.eawt.FullScreenAdapter on macOS
 // (OSXFullScreenAdapter). Without these, the JVM throws IllegalAccessError at class load.
 val macEawtJvmArgs = listOf(
@@ -170,6 +190,104 @@ tasks.register<Test>("runTests") {
     }
 }
 
+tasks.register<JavaExec>("exportLocalPlannerComparison") {
+    group = "verification"
+    description = "Export deterministic local planner results for the opt-in upstream comparison harness"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.util.walker.LocalPlannerComparisonMain")
+
+    val corpus = providers.gradleProperty("plannerCorpus")
+    val output = providers.gradleProperty("plannerOutput")
+    doFirst {
+        require(corpus.isPresent && output.isPresent) {
+            "exportLocalPlannerComparison requires -PplannerCorpus=<path> and -PplannerOutput=<path>"
+        }
+        args(rootProject.file(corpus.get()).absolutePath, rootProject.file(output.get()).absolutePath)
+        systemProperty("microbot.planner.revision",
+            providers.gradleProperty("plannerRevision").getOrElse("unknown"))
+    }
+
+    outputs.upToDateWhen { false }
+}
+
+tasks.register<JavaExec>("exportEmbeddedUpstreamPlannerComparison") {
+    group = "verification"
+    description = "Export results from the production-packaged pinned upstream planner adapter"
+
+    dependsOn(":client:compileJava", ":client:compileTestJava")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("net.runelite.client.plugins.microbot.util.walker.LocalPlannerComparisonMain")
+
+    val corpus = providers.gradleProperty("plannerCorpus")
+    val output = providers.gradleProperty("plannerOutput")
+    doFirst {
+        require(corpus.isPresent && output.isPresent) {
+            "exportEmbeddedUpstreamPlannerComparison requires -PplannerCorpus=<path> and -PplannerOutput=<path>"
+        }
+        args(rootProject.file(corpus.get()).absolutePath, rootProject.file(output.get()).absolutePath)
+        systemProperty("microbot.planner.revision",
+            providers.gradleProperty("plannerRevision").getOrElse("unknown"))
+        systemProperty("microbot.planner.embedded-upstream", "true")
+    }
+
+    outputs.upToDateWhen { false }
+}
+
+// Build one plugin artifact without embedding the client or shared services.
+val configureStandalonePluginJar: Jar.(String, String) -> Unit = { pluginPackage, pluginClass ->
+    group = "build"
+    dependsOn(tasks.named("classes"))
+    val packagePath = pluginPackage.replace('.', '/')
+    archiveFileName.set("${pluginClass.substringAfterLast('.').ifBlank { "plugin" }}.jar")
+    from(sourceSets.main.get().output) {
+        include("$packagePath/**")
+        exclude("**/AGENTS.md", "**/README.md", "**/docs/**", "**/dependencies.txt")
+    }
+    manifest {
+        attributes(mapOf(
+            "Microbot-Plugin-Id" to pluginClass,
+            "Microbot-Plugin-Class" to pluginClass
+        ))
+    }
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+
+    doFirst {
+        val microbotPrefix = "net.runelite.client.plugins.microbot."
+        val qualifiedName = Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+")
+        require(qualifiedName.matches(pluginPackage) && pluginPackage.startsWith(microbotPrefix)) {
+            "Set -PpluginPackage to one full Microbot plugin package"
+        }
+        val sharedPackages = setOf(
+            "agentserver", "api", "externalplugins", "globval", "statemachine", "ui", "util"
+        )
+        require(pluginPackage.removePrefix(microbotPrefix).substringBefore('.') !in sharedPackages) {
+            "Shared Microbot services cannot be exported as a standalone plugin"
+        }
+        require(qualifiedName.matches(pluginClass) && pluginClass.startsWith("$pluginPackage.")) {
+            "Set -PpluginClass to the full @PluginDescriptor class inside -PpluginPackage"
+        }
+        val classPath = pluginClass.replace('.', '/') + ".class"
+        require(sourceSets.main.get().output.classesDirs.any { File(it, classPath).isFile }) {
+            "Plugin entry class was not compiled: $pluginClass"
+        }
+        val sourceFile = file("src/main/java/${pluginClass.replace('.', '/')}.java")
+        require(sourceFile.isFile && sourceFile.readText().contains("@PluginDescriptor")) {
+            "Plugin entry class must declare @PluginDescriptor: $pluginClass"
+        }
+    }
+}
+
+tasks.register<Jar>("pluginJar") {
+    description = "Export one plugin with -PpluginPackage=<full package> -PpluginClass=<full class>"
+    configureStandalonePluginJar(
+        providers.gradleProperty("pluginPackage").getOrElse(""),
+        providers.gradleProperty("pluginClass").getOrElse("")
+    )
+}
+
 tasks.register<Test>("runUnitTests") {
     group = "verification"
     description = "Run unit tests only (no client, no login) — safe for CI"
@@ -208,6 +326,12 @@ tasks.register<Test>("runUnitTests") {
         events("passed", "skipped", "failed")
         showStandardStreams = true
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (gradle.startParameter.taskNames.any { it == ":client:test" || it == "client:test" }) {
+        throw GradleException(":client:test is disabled and runs no tests. Use :client:runUnitTests (it accepts --tests).")
     }
 }
 
@@ -468,10 +592,14 @@ tasks.processResources {
 
     val microbotVersion = microbotVersionProvider.get()
     val microbotCommit = providers.gradleProperty("microbot.commit.sha").getOrElse(commit.toString().trim())
+    val microbotBuildChannel = providers.gradleProperty("microbot.build.channel").getOrElse("")
+    val microbotBuildRepository = providers.gradleProperty("microbot.build.repository").getOrElse("")
 
     // Ensure task reruns when injected values change
     inputs.property("microbotVersion", microbotVersion)
     inputs.property("microbotCommit", microbotCommit)
+    inputs.property("microbotBuildChannel", microbotBuildChannel)
+    inputs.property("microbotBuildRepository", microbotBuildRepository)
 
     filesMatching("net/runelite/client/runelite.properties") {
         filter { it.replace("\${project.version}", project.version.toString()) }
@@ -479,6 +607,8 @@ tasks.processResources {
         filter { it.replace("\${git.dirty}", dirty.toString().isNotBlank().toString()) }
         filter { it.replace("\${microbot.version}", microbotVersion) }
         filter { it.replace("\${microbot.commit.sha}", microbotCommit) }
+        filter { it.replace("\${microbot.build.channel}", microbotBuildChannel) }
+        filter { it.replace("\${microbot.build.repository}", microbotBuildRepository) }
     }
 }
 

@@ -14,7 +14,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -23,6 +25,8 @@ public class Rs2PlayerStateCacheTest
 {
 	private static final int VARP_ID = 100;
 	private static final int VARBIT_ID = 200;
+	private static final int UNKNOWN_VARBIT_ID = 16971;
+	private static final int VARP_COUNT = 5996;
 
 	private Client client;
 	private EventBus eventBus;
@@ -42,7 +46,109 @@ public class Rs2PlayerStateCacheTest
 			return Optional.ofNullable(callable.call());
 		});
 
+		when(client.getVarps()).thenReturn(new int[VARP_COUNT]);
+
 		cache = new Rs2PlayerStateCache(eventBus, client, clientThread);
+	}
+
+	@Test
+	public void outOfRangeVarpReturnsZeroWithoutReadingClient()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+
+		assertEquals(0, cache.getVarpValue(VARP_COUNT));
+		assertEquals(0, cache.getVarpValue(8063));
+		assertEquals(0, cache.getVarpValue(-1));
+
+		verify(client, never()).getVarpValue(anyInt());
+	}
+
+	@Test
+	public void varbitReturnsZeroWithoutCachingWhileVarbitTableIsUnloaded()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		when(client.getVarbitValue(VARBIT_ID))
+			.thenThrow(new NullPointerException())
+			.thenReturn(6);
+
+		assertEquals(0, cache.getVarbitValue(VARBIT_ID));
+		assertEquals(6, cache.getVarbitValue(VARBIT_ID));
+		assertEquals(6, cache.getVarbitValue(VARBIT_ID));
+
+		verify(client, times(2)).getVarbitValue(VARBIT_ID);
+	}
+
+	@Test
+	public void unknownVarbitReturnsZeroWithoutCaching()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		when(client.getVarbitValue(UNKNOWN_VARBIT_ID))
+			.thenThrow(new IndexOutOfBoundsException("Varbit 16971 does not exist"));
+
+		assertEquals(0, cache.getVarbitValue(UNKNOWN_VARBIT_ID));
+		assertEquals(0, cache.getVarbitValue(UNKNOWN_VARBIT_ID));
+
+		verify(client, times(2)).getVarbitValue(UNKNOWN_VARBIT_ID);
+	}
+
+	@Test
+	public void isValidVarbitIdRejectsUnknownAndNegativeIds()
+	{
+		when(client.getVarbitValue(UNKNOWN_VARBIT_ID))
+			.thenThrow(new IndexOutOfBoundsException("Varbit 16971 does not exist"));
+		when(client.getVarbitValue(VARBIT_ID)).thenReturn(0);
+
+		assertEquals(Optional.of(true), cache.isValidVarbitId(VARBIT_ID));
+		assertEquals(Optional.of(false), cache.isValidVarbitId(UNKNOWN_VARBIT_ID));
+		assertEquals(Optional.of(false), cache.isValidVarbitId(-1));
+		verify(client, never()).getVarbitValue(-1);
+	}
+
+	@Test
+	public void isValidVarbitIdAcceptsIdWhileVarbitTableIsUnloaded()
+	{
+		when(client.getVarbitValue(VARBIT_ID)).thenThrow(new NullPointerException());
+
+		assertEquals(Optional.of(true), cache.isValidVarbitId(VARBIT_ID));
+	}
+
+	@Test
+	public void isValidVarbitIdIsEmptyWhenClientThreadUnavailable()
+	{
+		ClientThread unavailable = mock(ClientThread.class);
+		when(unavailable.runOnClientThreadOptional(any())).thenReturn(Optional.empty());
+		Rs2PlayerStateCache stalled = new Rs2PlayerStateCache(eventBus, client, unavailable);
+
+		assertEquals(Optional.empty(), stalled.isValidVarbitId(VARBIT_ID));
+		assertEquals(Optional.of(false), stalled.isValidVarbitId(-1));
+	}
+
+	@Test
+	public void isValidVarpIdChecksVarpArrayBounds()
+	{
+		assertEquals(Optional.of(true), cache.isValidVarpId(0));
+		assertEquals(Optional.of(true), cache.isValidVarpId(VARP_COUNT - 1));
+		assertEquals(Optional.of(false), cache.isValidVarpId(VARP_COUNT));
+		assertEquals(Optional.of(false), cache.isValidVarpId(8063));
+		assertEquals(Optional.of(false), cache.isValidVarpId(-1));
+		assertEquals(Optional.of(false), cache.isValidVarpId(Integer.MIN_VALUE));
+	}
+
+	@Test
+	public void isValidVarpIdIsEmptyWhenClientThreadUnavailable()
+	{
+		ClientThread unavailable = mock(ClientThread.class);
+		when(unavailable.runOnClientThreadOptional(any())).thenReturn(Optional.empty());
+		Rs2PlayerStateCache stalled = new Rs2PlayerStateCache(eventBus, client, unavailable);
+
+		assertEquals(Optional.empty(), stalled.isValidVarpId(281));
+		assertEquals(Optional.of(false), stalled.isValidVarpId(-1));
+	}
+
+	@Test
+	public void isVarpIdInRangeRejectsMissingVarpArray()
+	{
+		assertFalse(Rs2PlayerStateCache.isVarpIdInRange(null, 0));
 	}
 
 	private void setGameState(GameState gameState)
@@ -125,6 +231,58 @@ public class Rs2PlayerStateCacheTest
 	}
 
 	@Test
+	public void varbitChangeCachesTheFullParentVarp()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		when(client.getVarpValue(VARP_ID)).thenReturn(128);
+		assertEquals(128, cache.getVarpValue(VARP_ID));
+
+		// Setting bit 8 preserves the other bits in the parent varp.
+		when(client.getVarpValue(VARP_ID)).thenReturn(384);
+		VarbitChanged event = new VarbitChanged();
+		event.setVarpId(VARP_ID);
+		event.setVarbitId(VARBIT_ID);
+		event.setValue(1);
+		eventBus.post(event);
+
+		assertEquals(1, cache.getVarbitValue(VARBIT_ID));
+		assertEquals(384, cache.getVarpValue(VARP_ID));
+		assertEquals(384, cache.getVarpValue(VARP_ID));
+		verify(client, times(2)).getVarpValue(VARP_ID);
+	}
+
+	@Test
+	public void clearingVarbitPreservesOtherBitsInCachedParentVarp()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		when(client.getVarpValue(VARP_ID)).thenReturn(384);
+		assertEquals(384, cache.getVarpValue(VARP_ID));
+
+		when(client.getVarpValue(VARP_ID)).thenReturn(128);
+		VarbitChanged event = new VarbitChanged();
+		event.setVarpId(VARP_ID);
+		event.setVarbitId(VARBIT_ID);
+		event.setValue(0);
+		eventBus.post(event);
+
+		assertEquals(0, cache.getVarbitValue(VARBIT_ID));
+		assertEquals(128, cache.getVarpValue(VARP_ID));
+	}
+
+	@Test
+	public void varbitChangeWithoutParentIdOnlyUpdatesVarbitCache()
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		VarbitChanged event = new VarbitChanged();
+		event.setVarbitId(VARBIT_ID);
+		event.setValue(3);
+		eventBus.post(event);
+
+		assertEquals(3, cache.getVarbitValue(VARBIT_ID));
+		verify(client, never()).getVarpValue(anyInt());
+	}
+
+	@Test
 	public void hoppingFlushesVarbitAndVarpCaches()
 	{
 		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
@@ -152,13 +310,17 @@ public class Rs2PlayerStateCacheTest
 
 		VarbitChanged event = new VarbitChanged();
 		event.setVarpId(VARP_ID);
+		event.setVarbitId(VARBIT_ID);
 		event.setValue(42);
 		cache.onVarbitChanged(event);
+		verify(client, never()).getVarpValue(anyInt());
 
 		setGameState(GameState.LOGGED_IN);
 		when(client.getVarpValue(VARP_ID)).thenReturn(0);
+		when(client.getVarbitValue(VARBIT_ID)).thenReturn(0);
 
 		assertEquals(0, cache.getVarpValue(VARP_ID));
+		assertEquals(0, cache.getVarbitValue(VARBIT_ID));
 		verify(client, times(1)).getVarpValue(VARP_ID);
 	}
 

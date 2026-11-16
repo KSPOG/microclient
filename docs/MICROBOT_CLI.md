@@ -45,6 +45,7 @@ The CLI reads three environment variables:
 | `MICROBOT_TIMEOUT` | `30` | Request timeout in seconds |
 | `MICROBOT_TOKEN` | unset | Override the `X-Agent-Token` value |
 | `MICROBOT_TOKEN_FILE` | `~/.runelite/.agent-token` | Token file path |
+| `MICROBOT_SOCKET` | auto | Unix socket path; used automatically when `~/.runelite/agent/agent.sock` exists and `MICROBOT_HOST`/`MICROBOT_PORT` are unset (falls back to TCP if the socket is stale) |
 
 Example with custom port:
 
@@ -65,6 +66,19 @@ MICROBOT_PORT=9090 ./microbot-cli state
 
 # Single skill
 ./microbot-cli skills --name Attack
+
+# Everything at once: state, inventory, equipment, dialogue, recent game chat, script health
+./microbot-cli observe
+
+# Only chat lines newer than the last cursor, plus the nearest NPCs/objects within 10 tiles
+./microbot-cli observe --chat-since 41 --nearby 10
+
+# After an interaction: wait 3 ticks, then show the click that was sent and what the game said
+./microbot-cli observe --wait-ticks 3 --chat-since 41 --menu-since 12
+
+# Recent varbit/varp changes, optionally for one varbit
+./microbot-cli var-changes --since 1200
+./microbot-cli var-changes --varbit 4070
 ```
 
 ### Widget Inspection
@@ -127,6 +141,9 @@ Widgets are the game's UI elements (interfaces, buttons, toggles, text). Use the
 # Interact with the nearest matching NPC
 ./microbot-cli npcs interact "Banker" "Bank"
 ./microbot-cli npcs interact "Guard" "Attack"
+
+# Interact with the nearest NPC with that id
+./microbot-cli npcs interact --id 3010 "Attack"
 ```
 
 ### Objects
@@ -170,6 +187,16 @@ The walk command is **non-blocking by default** — it starts the walk and retur
 ./microbot-cli walk 3222 3218 --wait --timeout 60
 ```
 
+Plan a route without moving, to see why a walk fails or takes a strange route:
+
+```bash
+./microbot-cli path 3164 3486                       # termination, tiles, transports, cost
+./microbot-cli path 3164 3486 0 --from 3222 3218 0  # from another start tile
+./microbot-cli path 3164 3486 --full                # include every tile
+./microbot-cli path active                          # route the walker is following now
+./microbot-cli tile 3108 3353                       # static vs live collision for one tile
+```
+
 ### Banking
 
 ```bash
@@ -191,6 +218,10 @@ The walk command is **non-blocking by default** — it starts the walk and retur
 # Withdraw items (name + quantity)
 ./microbot-cli bank withdraw "Pure essence" 28
 ./microbot-cli bank withdraw "Coins" 1000
+
+# Withdraw as notes (to sell), or switch back to items
+./microbot-cli bank withdraw "Gold ring" 0 --noted
+./microbot-cli bank withdraw "Gold bar" 27 --items
 ```
 
 ### Dialogue
@@ -315,6 +346,27 @@ A typical workflow: a contributor unsure whether their script utility needs to w
 ```
 
 These endpoints are designed for the Microbot-Hub automated testing loop: the Hub spawns a client, logs in, starts a script, polls status, and collects results. See `docs/AGENT_SERVER.md` for the full HTTP API.
+
+### Plugin Hub
+
+```bash
+# Search the Plugin Hub
+./microbot-cli plugins --search miner
+
+# List plugins loaded in this client
+./microbot-cli plugins --installed
+
+# Install the latest version, or a given version; blocks until loaded
+./microbot-cli plugins install AutoMiner
+./microbot-cli plugins install "Auto Miner" --version 1.4.0
+
+# Unload and delete
+./microbot-cli plugins remove AutoMiner
+```
+
+When the install is still running at `--timeout`, the command prints `{"status": "pending", ...}` and exits with status 0. Check the output, and wait until `plugins --search <name>` shows `loaded: true` with the requested `installedVersion` before you start the plugin.
+
+An installed plugin is not started. Start it with `./microbot-cli scripts start --name <name>`.
 
 ## Response Format
 

@@ -3,10 +3,24 @@ package net.runelite.client.plugins.microbot.shortestpath;
 import net.runelite.client.config.*;
 
 import java.awt.*;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 
 @ConfigGroup(ShortestPathPlugin.CONFIG_GROUP)
-@ConfigInformation("Press 'CTRL + X' to stop the webwalker automatically.")
+@ConfigInformation("Toggle walking pauses/resumes manual walking. Clear current path removes the destination (default: Ctrl + X).")
 public interface ShortestPathConfig extends Config {
+    @ConfigItem(keyName = "toggleWalkingHotkey", name = "Toggle walking",
+            description = "Enable or disable manual automatic walking, keeping the destination and route.", position = -2)
+    default Keybind toggleWalkingHotkey() {
+        return Keybind.NOT_SET;
+    }
+
+    @ConfigItem(keyName = "clearCurrentPathHotkey", name = "Clear current path",
+            description = "Cancel walking and remove the current route and destination.", position = -1)
+    default Keybind clearCurrentPathHotkey() {
+        return new Keybind(KeyEvent.VK_X, InputEvent.CTRL_DOWN_MASK);
+    }
+
     /* ------------------------------------------------------------------
      * Hotkeys — stored as config values but bound/displayed inline on
      * each side-panel category card (see ShortestPathPanel). Marked
@@ -339,7 +353,8 @@ public interface ShortestPathConfig extends Config {
             keyName = "useTeleportationMinigames",
             name = "Use teleportation to minigames",
             description = "Whether to include teleportation to minigames/activities/grouping in the path<br>" +
-                    "(e.g. the Nightmare Zone minigame teleport). These teleports share a 20 minute cooldown.",
+                    "(e.g. the Nightmare Zone minigame teleport). These teleports share a 20 minute cooldown,<br>" +
+                    "so the walker only uses one when it saves a long walk (about 200 tiles or more).",
             position = 16,
             section = sectionSettings
     )
@@ -432,6 +447,17 @@ public interface ShortestPathConfig extends Config {
             section = sectionSettings
     )
     default boolean usePoh() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "usePortalNexus",
+            name = "Use Portal Nexus",
+            description = "Include Portal Nexus destinations saved in PoH Web Config. Requires Player-owned-house Teleports.",
+            position = 24,
+            section = sectionSettings
+    )
+    default boolean usePortalNexus() {
         return true;
     }
 
@@ -795,7 +821,7 @@ public interface ShortestPathConfig extends Config {
     @ConfigItem(
             keyName = "interactWithRouteObstaclesAtRange",
             name = "Interact with obstacles at range",
-            description = "Click stairs, ladders and door transports on the route as soon as they are in "
+            description = "Click doors, stairs, ladders, stiles and other object transports as soon as they are in "
                     + "range and let the game walk you there, instead of walking to a chosen approach tile "
                     + "first. Only ever applies to the NEXT obstacle on the route, and falls back to the old "
                     + "behaviour for any obstacle the server declines to path to.",
@@ -831,8 +857,8 @@ public interface ShortestPathConfig extends Config {
     }
 
 	@ConfigSection(
-			name = "Spirit tree teleports",
-			description = "Toggle which spirit tree destinations to use",
+			name = "Farmed spirit trees (opt-in)",
+			description = "Enable only the farming-patch spirit trees you have grown yourself",
 			position = 5,
 			closedByDefault = true
 	)
@@ -841,56 +867,56 @@ public interface ShortestPathConfig extends Config {
 	@ConfigItem(
 			keyName = "spiritTreeEtceteria",
 			name = "Etceteria",
-			description = "Use the spirit tree teleport to Etceteria",
+			description = "Use the spirit tree in Etceteria. Only enable if you have grown a spirit tree in this patch",
 			position = 0,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeEtceteria() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeBrimhaven",
 			name = "Brimhaven",
-			description = "Use the spirit tree teleport to Brimhaven",
+			description = "Use the spirit tree in Brimhaven. Only enable if you have grown a spirit tree in this patch",
 			position = 1,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeBrimhaven() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreePortSarim",
 			name = "Port Sarim",
-			description = "Use the spirit tree teleport to Port Sarim",
+			description = "Use the spirit tree in Port Sarim. Only enable if you have grown a spirit tree in this patch",
 			position = 2,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreePortSarim() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeHosidius",
 			name = "Hosidius",
-			description = "Use the spirit tree teleport to Hosidius",
+			description = "Use the spirit tree in Hosidius. Only enable if you have grown a spirit tree in this patch",
 			position = 3,
 			section = sectionSpiritTrees
 	)
 	default boolean spiritTreeHosidius() {
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
 			keyName = "spiritTreeFarmingGuild",
 			name = "Farming Guild",
-			description = "Use the spirit tree teleport to the Farming Guild",
+			description = "Use the spirit tree in the Farming Guild. Only enable if you have grown a spirit tree in this patch",
 			position = 4,
 			section = sectionSpiritTrees
 	)
     default boolean spiritTreeFarmingGuild() {
-        return true;
+        return false;
     }
 
     @ConfigSection(
@@ -932,4 +958,18 @@ public interface ShortestPathConfig extends Config {
     default boolean resetLearnedCollision() {
         return false;
     }
+
+	@ConfigItem(
+			keyName = "plannerSelectionMode",
+			name = "Planner rollout mode",
+			description = "Local is the production default. Shadow compares the pinned upstream planner. "
+					+ "The F2P canary selects only semantically matching upstream routes and automatically "
+					+ "falls back to local; members routes remain local.",
+			position = 3,
+			section = sectionDeveloper,
+			hidden = true
+	)
+	default PlannerSelectionMode plannerSelectionMode() {
+		return PlannerSelectionMode.LOCAL;
+	}
 }

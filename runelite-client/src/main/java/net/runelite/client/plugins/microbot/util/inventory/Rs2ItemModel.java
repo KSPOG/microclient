@@ -1,6 +1,5 @@
 package net.runelite.client.plugins.microbot.util.inventory;
 
-import com.google.common.primitives.Ints;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -251,13 +250,16 @@ public class Rs2ItemModel {
         }
     }
 
-    public int getPrice() {
-        return Ints.saturatedCast(Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getItemManager().getItemPrice(id) * quantity).orElse(0L));
+    public long getPrice() {
+        return Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getItemManager().getItemPrice(id) * quantity).orElse(0L);
     }
 
     public int getHaPrice() {
-        return itemComposition.getHaPrice();
+        if (itemComposition == null) {
+            ensureCompositionLoaded();
+        }
+        return itemComposition != null ? itemComposition.getHaPrice() : 0;
     }
 
     public boolean isHaProfitable() {
@@ -301,7 +303,7 @@ public class Rs2ItemModel {
         sb.append("\tisFood: ").append(isFood()).append("\n");
 
         // Price information
-        int price = getPrice();
+        long price = getPrice();
         sb.append("\tprice: ").append(price).append(" gp (total)\n");
         if (quantity > 0) {
             sb.append("\tunitPrice: ").append(price / quantity).append(" gp (each)\n");

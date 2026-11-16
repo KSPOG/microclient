@@ -46,12 +46,18 @@ public final class LiveCollisionCapture {
      * disagree with what a fresh capture would now produce, so {@link LiveCollisionPersistence} rejects the
      * stale data on load instead of trusting it. This is what removes the manual "Reset learned collision"
      * step: e.g. adding the rockfall exemption changed what a rockfall tile records, so that data must not
-     * survive the change. History: v1 = original translation; v2 = rockfall (26679/26680) exemption.
+     * survive the change. History: v1 = original translation; v2 = rockfall (26679/26680) exemption;
+     * v3 = wall-door FOOTPRINT deferral — v2 stores could hold known+blocked diagonal edges around a
+     * closed door (the oriented mask missed them), and two such doors sealed the Falador farm interior,
+     * so every v2 store is potentially door-poisoned and must be discarded.
+     * v4 = the wall-door footprint is really deferred — v3 recorded every edge touching a wall door's
+     * tile known+passable, so a fixed wall sharing a tile with a door (East Ardougne market,
+     * 2656,3292 -> 2656,3291) was persisted as a doorway and routed across; those stores must go.
      * (Door edges changing from unknown to known-passable did NOT need a bump: v2 stores hold no door
      * edges at all — they were always unknown — so old data cannot disagree, it is merely less informed
      * and gets filled in by the next capture.)
      */
-    public static final int CAPTURE_VERSION = 2;
+    public static final int CAPTURE_VERSION = 4;
 
     /**
      * Actions that mark a wall object as a door the walker opens at runtime. Mirrors the door-action set
@@ -131,7 +137,7 @@ public final class LiveCollisionCapture {
 
     /**
      * Scans the loaded scene for objects owned by the runtime door handler. Wall objects contribute
-     * only their oriented door edge; game-object doors contribute the edges touching their footprint
+     * their oriented door edge and defer the rest of their tile; game-object doors contribute the edges touching their footprint
      * because they do not expose a wall orientation.
      */
     private static LiveCollisionDoorMask findDoorEdges(WorldView wv, int planeCount) {
@@ -164,6 +170,14 @@ public final class LiveCollisionCapture {
                     if (wall != null && wallDoorIds.computeIfAbsent(
                             wall.getId(), LiveCollisionCapture::isOpenableDoor)) {
                         doorEdges.markWall(z, sx, sy, wall.getOrientationA(), wall.getOrientationB());
+                        // A closed door blocks more than its oriented edge in the live flags: the
+                        // wall also blocks the DIAGONAL edges cutting its corners, which the
+                        // oriented mask missed — those were captured known+blocked and PERSISTED,
+                        // and two such doors sealed the Falador farm interior (2026-08-14 17:43),
+                        // turning every plan to it into a SEARCH_EXHAUSTED partial-segment crawl.
+                        // Defer every other edge touching the door's tile to the static map: left
+                        // unknown, never forced passable, because a fixed wall can share the tile.
+                        doorEdges.markWallFootprint(z, sx, sy);
                     }
                     final GameObject[] gameObjects = tile.getGameObjects();
                     if (gameObjects == null) {
@@ -277,7 +291,7 @@ public final class LiveCollisionCapture {
                                 northKnown.set(index);
                                 northValue.set(index);
                             }
-                        } else {
+                        } else if (doorEdges == null || !doorEdges.defersNorth(z, sx, sy)) {
                             northKnown.set(index);
                             final boolean open = walkableHere
                                     && standable(north)
@@ -297,7 +311,7 @@ public final class LiveCollisionCapture {
                                 eastKnown.set(index);
                                 eastValue.set(index);
                             }
-                        } else {
+                        } else if (doorEdges == null || !doorEdges.defersEast(z, sx, sy)) {
                             eastKnown.set(index);
                             final boolean open = walkableHere
                                     && standable(east)

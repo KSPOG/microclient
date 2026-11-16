@@ -13,7 +13,7 @@ import net.runelite.client.plugins.microbot.pouch.Pouch;
 import net.runelite.client.plugins.microbot.util.antiban.Rs2AntibanSettings;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
 import net.runelite.client.plugins.microbot.util.grandexchange.Rs2GrandExchange;
 import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
@@ -27,7 +27,6 @@ import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.shop.Rs2Shop;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
-import org.apache.commons.lang3.NotImplementedException;
 import org.slf4j.event.Level;
 
 import java.awt.*;
@@ -159,6 +158,8 @@ public class Rs2Inventory {
      * @return True if the combine operation was successful, false otherwise.
      */
     public static boolean combine(Rs2ItemModel primary, Rs2ItemModel secondary) {
+        if (primary == null || secondary == null) return false;
+
         // Get the primary item
         Rs2ItemModel primaryItem = get(item -> item.getId() == primary.getId());
         if (primaryItem == null) {
@@ -1200,8 +1201,7 @@ public class Rs2Inventory {
      */
     public static boolean interact(Rs2ItemModel item, String action) {
         if (item == null) return false;
-        invokeMenu(item, action);
-        return true;
+        return invokeMenu(item, action);
     }
 
     /**
@@ -1328,15 +1328,6 @@ public class Rs2Inventory {
      */
     public static boolean isEmpty() {
         return items().findAny().isEmpty();
-    }
-
-    /**
-     * Checks whether the inventory is configured to ignore whether shift interactions are enabled or not.
-     *
-     * @return True if the inventory ignores shift interactions, false otherwise.
-     */
-    public static boolean isForceNoShift() {
-        throw new NotImplementedException("TODO");
     }
 
     /**
@@ -1727,7 +1718,7 @@ public class Rs2Inventory {
     public static boolean useUnNotedItemOnObject(String item, int objectID) {
         if (Rs2Bank.isOpen()) return false;
         useUnNoted(item);
-        Rs2GameObject.interact(objectID);
+        Microbot.getRs2TileObjectCache().query().fromWorldView().withId(objectID).interact();
         return true;
     }
 
@@ -1743,7 +1734,7 @@ public class Rs2Inventory {
         if (Rs2Bank.isOpen()) return false;
         if (!useUnNoted(item)) return false;
         sleep(100);
-        return isItemSelected() && Rs2GameObject.interact(object);
+        return isItemSelected() && object != null && new Rs2TileObjectModel(object).click();
     }
 
     /**
@@ -1758,7 +1749,7 @@ public class Rs2Inventory {
         if (Rs2Bank.isOpen()) return false;
         if (!use(item)) return false;
         sleep(100);
-        return isItemSelected() && Rs2GameObject.interact(objectID);
+        return isItemSelected() && Microbot.getRs2TileObjectCache().query().fromWorldView().withId(objectID).interact();
     }
 
     /**
@@ -1894,9 +1885,10 @@ public class Rs2Inventory {
      *
      * @param rs2Item            The current item to interact with.
      * @param action             The action to be used on the item.
+     * @return false if the menu could not be sent or a Destroy was not confirmed, true otherwise.
      */
-    private static void invokeMenu(Rs2ItemModel rs2Item, String action) {
-        if (rs2Item == null) return;
+    private static boolean invokeMenu(Rs2ItemModel rs2Item, String action) {
+        if (rs2Item == null) return false;
         Rs2Tab.switchToInventoryTab();
         Microbot.status = action + " " + rs2Item.getName();
 
@@ -1935,10 +1927,10 @@ public class Rs2Inventory {
             inventoryWidgets = null;
         }
 
-        if (inventoryWidgets == null) return;
+        if (inventoryWidgets == null) return false;
 
         if (!action.isEmpty()) {
-            var itemWidget = Arrays.stream(inventoryWidgets).filter(x -> x != null && x.getIndex() == rs2Item.getSlot()).findFirst().orElseGet(null);
+            var itemWidget = Arrays.stream(inventoryWidgets).filter(x -> x != null && x.getIndex() == rs2Item.getSlot()).findFirst().orElse(null);
 
             String[] actions = itemWidget != null && itemWidget.getActions() != null ?
                     itemWidget.getActions() :
@@ -1984,9 +1976,20 @@ public class Rs2Inventory {
                 (itemBounds(rs2Item) == null) ? new Rectangle(1, 1) : itemBounds(rs2Item));
 
         if (action.equalsIgnoreCase("destroy")) {
-            sleepUntil(() -> Rs2Widget.isWidgetVisible(584, 0));
-            Rs2Widget.clickWidget(Rs2Widget.getWidget(584, 1).getId());
+            if (!sleepUntil(() -> Rs2Widget.isWidgetVisible(584, 0))) {
+                Microbot.status = action + " " + rs2Item.getName() + " not confirmed";
+                Microbot.log("Could not confirm destroying " + rs2Item.getName() + ": the destroy confirmation did not appear in time. If it is open, click Yes. If not, right-click " + rs2Item.getName() + " and choose Destroy yourself.", Level.WARN);
+                return false;
+            }
+            Widget confirmWidget = Rs2Widget.getWidget(584, 1);
+            if (confirmWidget == null) {
+                Microbot.status = action + " " + rs2Item.getName() + " not confirmed";
+                Microbot.log("Could not confirm destroying " + rs2Item.getName() + ": the Yes button was not found. Click Yes on the dialog yourself.", Level.WARN);
+                return false;
+            }
+            Rs2Widget.clickWidget(confirmWidget.getId());
         }
+        return true;
     }
 
 
@@ -2330,14 +2333,15 @@ public class Rs2Inventory {
         if (item == null) return false;
         if (!Rs2AntibanSettings.naturalMouse) {
             if(Rs2AntibanSettings.devDebug)
-                Microbot.log("Natural mouse is not enabled, can't hover");
+                Microbot.log("Hover skipped: 'Aim Clicks From Cursor' is off in Antiban > Mouse");
             return false;
         }
-        Point point = Rs2UiHelper.getClickingPoint(itemBounds(item), true);
-        // if the point is 1,1 then the object is not on screen and we should return false
-        if (point.getX() == 1 && point.getY() == 1) {
+        Rectangle bounds = itemBounds(item);
+        // a fallback rectangle means the item is not on screen and we should return false
+        if (Rs2UiHelper.isFallbackRectangle(bounds)) {
             return false;
         }
+        Point point = Rs2UiHelper.getClickingPoint(bounds, true);
         Microbot.getNaturalMouse().moveTo(point.getX(), point.getY());
         return true;
     }

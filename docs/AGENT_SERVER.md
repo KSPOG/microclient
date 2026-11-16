@@ -35,7 +35,7 @@ The Agent Server is an embedded HTTP server that exposes Microbot's widget syste
 └──────────────────────────────────────────────────┘
 ```
 
-TCP mode binds to `127.0.0.1` only. UDS mode binds to `~/.runelite/.agent.sock` and falls back to TCP if UDS startup fails. All game data access is thread-safe via `runOnClientThreadOptional` or the singleton cache queryable API.
+TCP mode binds to `127.0.0.1` only. UDS mode binds to `~/.runelite/agent/agent.sock` and falls back to TCP if UDS startup fails. All game data access is thread-safe via `runOnClientThreadOptional` or the singleton cache queryable API.
 
 ## Server Lifecycle
 
@@ -47,7 +47,7 @@ TCP mode binds to `127.0.0.1` only. UDS mode binds to `~/.runelite/.agent.sock` 
 
 ## Setup
 
-1. Build: `./gradlew :client:compileJava`
+1. Build: `./gradlew :client:compileJava`. The Gradle daemon needs a JDK 17 install (`gradle/gradle-daemon-jvm.properties`); newer JDKs alone fail with "Cannot find a Java installation".
 2. Launch the client
 3. Enable **"Agent Server"** in the Microbot plugin list
 4. Server starts on port `8081` (configurable)
@@ -59,9 +59,10 @@ TCP mode binds to `127.0.0.1` only. UDS mode binds to `~/.runelite/.agent.sock` 
 |---------|---------|-------------|
 | Port | `8081` | HTTP server port |
 | Max Results | `200` | Default limit for list/query endpoints |
-| Auth token | generated | Required in `X-Agent-Token`; stored in `~/.runelite/.agent-token` for CLI use |
+| Auth token | generated | Required in `X-Agent-Token`; stored in `~/.runelite/.agent-token` for CLI use. Clear it to generate a new one |
 | Stealth bind | `false` | Open the socket only while scripts are active |
-| Bind mode | `TCP` | `TCP` on localhost or `UDS` at `~/.runelite/.agent.sock` |
+| Bind mode | `TCP` | `TCP` on localhost or `UDS` at `~/.runelite/agent/agent.sock` |
+| Trace requests | `false` | Append every authenticated request (method, path with query, status, duration, and the *names* of JSON body fields) to `~/.runelite/agent-trace.jsonl` (owner-only, rotates to `.1` at 5 MB). Turning it off deletes both files |
 
 CLI environment variables:
 
@@ -72,8 +73,21 @@ CLI environment variables:
 | `MICROBOT_TIMEOUT` | `30` | Request timeout in seconds |
 | `MICROBOT_TOKEN` | unset | Override the `X-Agent-Token` value |
 | `MICROBOT_TOKEN_FILE` | `~/.runelite/.agent-token` | Token file path |
+| `MICROBOT_SOCKET` | auto | Unix socket path. Used automatically when `~/.runelite/agent/agent.sock` exists and `MICROBOT_HOST`/`MICROBOT_PORT` are unset; a stale socket falls back to TCP |
 
 ## API Reference
+
+### GET /
+
+Lists every endpoint path. An authenticated request to an unknown path returns `404` with the same list.
+
+```bash
+./microbot-cli endpoints
+```
+
+```json
+{"count": 30, "endpoints": ["/bank", "/debug/snapshot", "/dialogue", "..."], "docs": "docs/AGENT_SERVER.md"}
+```
 
 ### Widget Endpoints
 
@@ -155,9 +169,41 @@ Response includes `reason` field when `clicked` is `false`.
     "interacting": false,
     "position": {"x": 3222, "y": 3218, "plane": 0}
   },
-  "scriptsPaused": false
+  "scriptsPaused": false,
+  "instance": {"pid": 48211, "microbotVersion": "2.6.41", "uptimeMs": 812345}
 }
 ```
+
+`instance` identifies which client answered, which matters when more than one is running.
+
+#### GET /var-changes
+
+Recent varbit and varp changes: the last 500 `VarbitChanged` events seen while the plugin is enabled. Useful for "did the quest varbit move after that step?" without knowing the id in advance.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `since` | `0` | Only changes newer than this cursor |
+| `varbit` | - | Only this varbit |
+| `varp` | - | Only this varp |
+| `limit` | `50` | Max changes (newest kept) |
+
+```bash
+./microbot-cli var-changes --since 1200
+./microbot-cli var-changes --varbit 4070
+```
+
+```json
+{
+  "cursor": 1214,
+  "count": 2,
+  "changes": [
+    {"varbit": 4070, "varp": 439, "value": 3, "seq": 1213, "at": 1761390000000},
+    {"varp": 281, "value": 1000, "seq": 1214, "at": 1761390000600}
+  ]
+}
+```
+
+A varbit change carries both `varbit` and the `varp` that holds it. A plain varp change has no `varbit`.
 
 #### GET /skills
 
@@ -177,6 +223,51 @@ Response includes `reason` field when `clicked` is `false`.
   "skills": [
     {"name": "Attack", "level": 70, "boostedLevel": 75, "xp": 737627}
   ]
+}
+```
+
+#### GET /observe
+
+One call for the usual "what is going on" check: everything from `/state`, plus inventory, equipment, dialogue, recent game chat, recent menu clicks, recent errors and script heartbeats. Inventory, equipment, dialogue and nearby entities are only included while logged in.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `chatSince` | - | Return chat lines newer than this cursor (up to 100). Without it, the last 10 lines are returned |
+| `menuSince` | - | Return menu clicks newer than this cursor (up to 50). Without it, the last 5 are returned |
+| `errorSince` | - | Return errors newer than this cursor (up to 50). Without it, the last 3 are returned |
+| `waitTicks` | `0` | Wait this many game ticks (max 10) before taking the snapshot. Ignored while logged out |
+| `nearby` | `0` | Also return the nearest NPCs and objects within this many tiles (max 30) |
+| `nearbyLimit` | `10` | Max NPCs and max objects when `nearby` is set |
+
+Each stream returns a `cursor`; pass it back as the matching `*Since` parameter to get only what happened since the last call.
+
+- **chat**: the last 100 game messages (`GAMEMESSAGE`, `SPAM`, `ENGINE`, `MESBOX`) with colour tags removed. Player chat is never recorded.
+- **menu**: the last 50 menu clicks that reached the client, from scripts or from the mouse: `option`, `target`, `action`, `id`, `itemId`, `param0`, `param1`. Compare it with what a script meant to click.
+- **errors**: the last 50 `ERROR` log events from any logger: logger, thread, message, root exception and its first 8 non-JDK frames.
+
+All three only cover the time the plugin has been enabled.
+
+A typical act-then-check step: interact, then `observe --wait-ticks 3 --chat-since <cursor> --menu-since <cursor>` to see the click that was sent, what the game said, and the resulting state in one call.
+
+```bash
+./microbot-cli observe
+./microbot-cli observe --chat-since 41 --nearby 10 --limit 5
+./microbot-cli observe --wait-ticks 3 --chat-since 41 --menu-since 12
+```
+
+```json
+{
+  "loggedIn": true,
+  "gameState": "LOGGED_IN",
+  "player": {"name": "PlayerName", "position": {"x": 3222, "y": 3218, "plane": 0}, "...": "same as /state"},
+  "scriptsPaused": false,
+  "inventory": {"count": 1, "capacity": 28, "freeSlots": 27, "full": false, "items": [{"id": 1351, "name": "Bronze axe", "quantity": 1, "slot": 0}]},
+  "equipment": [{"slot": "WEAPON", "id": 1351, "name": "Bronze axe", "quantity": 1}],
+  "dialogue": {"inDialogue": false},
+  "chat": {"cursor": 42, "messages": [{"type": "GAMEMESSAGE", "message": "You can't reach that.", "seq": 42, "at": 1761390000000}]},
+  "menu": {"cursor": 12, "clicks": [{"option": "Chop down", "target": "Oak tree", "action": "GAME_OBJECT_FIRST_OPTION", "id": 10820, "itemId": -1, "param0": 51, "param1": 52, "seq": 12, "at": 1761389999400}]},
+  "errors": {"cursor": 0, "recent": []},
+  "scripts": [{"scriptClassName": "com.example.MyScript", "loopCount": 120, "lastHeartbeatAt": "2026-10-25T10:00:00Z", "stalledMs": 412}]
 }
 ```
 
@@ -247,6 +338,7 @@ Body: `{"name": "Banker", "action": "Bank"}` or `{"id": 3010, "action": "Attack"
 
 ```bash
 ./microbot-cli npcs interact "Banker" "Bank"
+./microbot-cli npcs interact --id 3010 "Attack"
 ```
 
 ### Objects
@@ -367,7 +459,86 @@ Blocking timeout response:
   "walking": true,
   "timedOut": true,
   "message": "Walk did not complete within 30s; still in progress",
+  "route": {"phase": "READY", "generation": 7, "termination": "TARGET_REACHED", "rawTiles": 412, "walkableTiles": 398, "...": "same as /path/active"},
   "playerPosition": {"x": 3150, "y": 3450, "plane": 0}
+}
+```
+
+Whenever a blocking walk does not succeed, the response includes `route`: the walker's current route, as returned by `GET /path/active`.
+
+#### GET /path
+
+Plans a route with the walker's pathfinder without moving the player. Use it to see why a walk fails or takes a strange route.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `x`, `y` | required | Destination |
+| `plane` | `0` | Destination plane |
+| `fromX`, `fromY`, `fromPlane` | player position | Plan from another start tile |
+| `bankItems` | walker setting | `true`/`false` to plan with or without items from the bank |
+| `full` | `false` | Include every path tile |
+
+```bash
+./microbot-cli path 3164 3486
+./microbot-cli path 3164 3486 0 --from 3222 3218 0 --full
+```
+
+```json
+{
+  "start": {"x": 3222, "y": 3218, "plane": 0},
+  "target": {"x": 3164, "y": 3486, "plane": 0},
+  "searchCompleted": true,
+  "termination": "TARGET_REACHED",
+  "reachesTarget": true,
+  "endpoint": {"x": 3164, "y": 3486, "plane": 0},
+  "endpointDistanceToTarget": 0,
+  "tiles": 289,
+  "metrics": {"searchMs": 41, "pathCost": 301, "nodesChecked": 18233, "transportsChecked": 112},
+  "transports": [{"from": {"x": 3216, "y": 3219, "plane": 0}, "to": {"x": 3217, "y": 3219, "plane": 0}, "type": "TRANSPORT", "info": "Open Door", "action": "Open", "target": "Door", "objectId": 1543, "teleport": false, "consumable": false}]
+}
+```
+
+`termination` is one of `TARGET_REACHED`, `SEARCH_EXHAUSTED`, `CUTOFF_REACHED`, `CANCELLED`, `FAILED`. When the target cannot be reached, `endpoint` and `endpointDistanceToTarget` show how close the planner got. The response is `503` while the pathfinder is not initialised and `409` when no start was given and the player position is unknown.
+
+While logged out the planner cannot check transport requirements, so routes that need stairs, doors or teleports can come back `SEARCH_EXHAUSTED` with no tiles. Plan those while logged in.
+
+Planning shares the walker's pathfinder lock, so a `/path` call waits for (and briefly holds up) a walk that is calculating its own route. Avoid polling it while a script is walking.
+
+#### GET /path/active
+
+The route the walker is currently following: `phase` (`ABSENT`, `CALCULATING`, `READY`), start, targets, endpoint, `termination`, tile counts and metrics. `?full=true` adds the walkable path.
+
+```bash
+./microbot-cli path active
+```
+
+#### GET /tile
+
+What the pathfinder believes about one tile. For each direction, `canMove` shows the static map's answer, the live collision captured from loaded scenes (omitted when that region was never loaded), the `effective` value the pathfinder uses (live wins), and whether the two disagree. `conflicts` lists the directions where they differ: the usual cause of a walker that tries to path through a closed door or gets stuck on a wall that moved. `regionMapped: false` means the static map has no data for the region, which makes every edge read as blocked. While logged in, `objects` lists the objects on that exact tile.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `x`, `y` | required | Tile |
+| `plane` | `0` | Plane |
+
+```bash
+./microbot-cli tile 3108 3353
+```
+
+```json
+{
+  "tile": {"x": 3108, "y": 3353, "plane": 0},
+  "regionMapped": true,
+  "blocked": false,
+  "conflicts": ["north"],
+  "canMove": {
+    "north": {"static": true, "live": false, "effective": false, "conflict": true},
+    "east": {"static": true, "live": true, "effective": true, "conflict": false},
+    "south": {"static": true, "effective": true, "conflict": false},
+    "west": {"static": false, "live": false, "effective": false, "conflict": false}
+  },
+  "liveCollisionEnabled": true,
+  "objects": [{"id": 1535, "name": "Door", "type": "WALL", "reachable": true, "position": {"x": 3108, "y": 3353, "plane": 0}}]
 }
 ```
 
@@ -407,6 +578,8 @@ Body: `{"all": true}` or `{"name": "Logs"}`
 #### POST /bank/withdraw
 
 Body: `{"name": "Pure essence", "quantity": 28}`
+
+Add `"noted": true` to withdraw as notes, or `"noted": false` to switch back to items. Without `noted`, the current bank setting stays. When the bank does not switch mode, the call returns `409` and withdraws nothing.
 
 ```bash
 ./microbot-cli bank withdraw "Pure essence" 28
@@ -492,6 +665,8 @@ When the client is on the login screen, the response includes `loginIndex` and `
   "loggedIn": true,
   "gameState": "LOGGED_IN",
   "loginAttemptActive": false,
+  "hopsAvailable": 372,
+  "nextHopInMs": 0,
   "loginDurationMs": 120000,
   "activeProfile": {
     "name": "player@email.com",
@@ -513,6 +688,8 @@ When the client is on the login screen, the response includes `loginIndex` and `
 | 34 | Non-member account cannot login to members world | F2P account on P2P world |
 
 `loginIndex` and `loginError` are only present when `gameState` is `LOGIN_SCREEN`. When logged in, these fields are omitted.
+
+`hopsAvailable` and `nextHopInMs` come from the world hop limiter (`HopBudget`). They are present whenever "Pace world hops" is enabled in the Microbot settings. `nextHopInMs` is how long `Microbot.hopToWorld` would wait right now, and is 0 while the allowance is above the login reserve.
 
 #### POST /login
 
@@ -665,7 +842,65 @@ curl -X POST -H "Content-Type: application/json" \
 - `404` — No profile matches the given name (response includes `available` list)
 - `503` — Profile system not initialized
 
+### Grand Exchange
+
+No endpoint walks. `buy`, `sell`, `collect` and `abort` open the Grand Exchange when a clerk is in reach, and return `409` with "Not at the Grand Exchange" otherwise; walk there first with `POST /walk`. `collect` and `abort` also return `409` when the inventory is full, so nothing is deposited behind your back. Only one write runs at a time; a second one returns `409` while the first is running. Every write returns the current offers; a write that fails returns `409` with `"success": false` and an `error` when the handler refused it. Item names match exactly.
+
+| Endpoint | Body | Effect |
+|----------|------|--------|
+| `GET /ge` | - | Active offers: `slot`, `item`, `itemId`, `state`, `price`, `done`, `total`, `spent` |
+| `POST /ge/buy` | `{"name", "quantity", "price"}` | Place a buy offer (exact item name) |
+| `POST /ge/sell` | `{"name", "quantity", "price"}` | Place a sell offer for an item in the inventory. Withdraw it first with `POST /bank/withdraw` and `"noted": true` |
+| `POST /ge/collect` | `{"toBank": true}` | Collect every finished offer |
+| `POST /ge/abort` | `{"name"}` | Abort the offer for that item and collect it to the bank. Succeeds once the offer is gone (waits up to 5 seconds) |
+| `POST /ge/close` | `{}` | Close the Grand Exchange interface |
+
+### Plugin Hub
+
+Installs and removes plugins from the Microbot Plugin Hub, the same way the Plugin Hub panel does. A plugin that is installed is loaded but not started; start it with `POST /scripts/start`.
+
+#### GET /plugins
+
+Lists Plugin Hub entries.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `q` | - | Case-insensitive match on internal name, display name or description |
+| `installed` | `false` | `true` returns only plugins loaded in this client |
+| `limit` | config max | Max results |
+| `offset` | `0` | Skip first N results |
+
+```json
+{
+  "count": 1, "total": 1, "offset": 0, "limit": 200,
+  "plugins": [
+    {"internalName": "AutoMiner", "name": "Auto Miner", "description": "...", "latestVersion": "2.0.0",
+     "installedVersion": null, "loaded": false, "health": "Health not reported", "installable": true}
+  ]
+}
+```
+
+#### POST /plugins/install
+
+Downloads and loads a plugin, and waits for the result. When the plugin is loaded at another version, it is reinstalled at the requested version.
+
+Body: `{"name": "AutoMiner", "version": "2.0.0", "timeout": 60}`. `name` accepts the internal name or the display name. `version` defaults to the latest Hub version and must be one of the manifest's available versions (`400` otherwise). `timeout` is in seconds (max 300).
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Plugin is loaded. The body is the plugin entry from `GET /plugins` |
+| `202` | Still running when `timeout` elapsed. Poll `GET /plugins?q=<name>` until `loaded` is `true` and `installedVersion` equals the requested version; the old version can still be loaded while an update runs |
+| `400` | No Plugin Hub entry with that name |
+| `409` | Health blocks the install (disabled upstream, broken version, or needs a newer client); the plugin is loaded from outside the Plugin Hub (a dev build or sideloaded jar), so nothing was changed; or another install or removal is still running |
+| `502` | Download or load failed; the client log has the cause |
+
+#### POST /plugins/remove
+
+Stops, unloads and deletes a plugin. Body: `{"name": "AutoMiner", "timeout": 60}`. Returns `404` when the plugin is not installed, and `409` when it is loaded from outside the Plugin Hub (nothing is deleted), when it is still loaded afterwards, or when another install or removal is still running.
+
 ### Script Lifecycle
+
+The examples below use the Microbot-Hub `ExamplePlugin` (`net.runelite.client.plugins.microbot.example`); it is no longer bundled with the client.
 
 #### GET /scripts
 
@@ -723,6 +958,16 @@ curl -X POST -H 'Content-Type: application/json' \
 {"success": true, "className": "net.runelite.client.plugins.microbot.example.ExamplePlugin", "status": "STOPPED"}
 ```
 
+#### GET /scripts/health
+
+Heartbeats of running `Script` loops. Without parameters it lists every script. With `className` or `name`, a plugin resolves to the `Script` classes in its package. A script class is matched exactly.
+
+Each entry has `loopCount`, `lastHeartbeatAt` and `stalledMs`. When an `ERROR` was logged from the script's package (by its logger, or with one of its classes in the stack), `lastError` holds the most recent one plus `recentCount`. That also shows on `NO_HEARTBEAT`, so a script that crashed before its first loop is visible.
+
+```bash
+./microbot-cli scripts health --class "com.example.MyPlugin"
+```
+
 #### GET /scripts/status
 
 Gets detailed status of a specific plugin, including runtime.
@@ -745,6 +990,19 @@ curl 'http://127.0.0.1:8081/scripts/status?className=net.runelite.client.plugins
   "startedAt": "2026-04-06T12:00:00Z",
   "runtimeMs": 45000
 }
+```
+
+#### POST /scripts/pause and /scripts/resume
+
+Pause or resume every script loop (`Microbot.pauseAllScripts`) without stopping any plugin, for example to inspect a running script's state with `/observe` while it holds still. `/state` and `/observe` report the flag as `scriptsPaused`.
+
+```bash
+./microbot-cli scripts pause
+./microbot-cli scripts resume
+```
+
+```json
+{"success": true, "scriptsPaused": true}
 ```
 
 #### POST /scripts/results
@@ -822,26 +1080,50 @@ The `AgentHandler` base class provides: `sendJson()`, `parseQuery()`, `readJsonB
 
 | File | Purpose |
 |------|---------|
-| `agentserver/AgentServerPlugin.java` | Plugin lifecycle, handler registration |
-| `agentserver/AgentServerConfig.java` | Port and max results config |
-| `agentserver/handler/AgentHandler.java` | Abstract base class for all handlers |
+| `agentserver/AgentServerPlugin.java` | Plugin lifecycle, handler registration, token file, stealth bind, chat capture |
+| `agentserver/AgentServerConfig.java` | Port, max results, token, stealth bind, bind mode |
+| `agentserver/handler/AgentHandler.java` | Base class: auth, JSON, query/body parsing, errors |
 | `agentserver/handler/WidgetListHandler.java` | `GET /widgets/list` |
 | `agentserver/handler/WidgetSearchHandler.java` | `GET /widgets/search` |
 | `agentserver/handler/WidgetDescribeHandler.java` | `GET /widgets/describe` |
 | `agentserver/handler/WidgetClickHandler.java` | `POST /widgets/click` |
+| `agentserver/handler/WidgetInvokeHandler.java` | `POST /widgets/invoke` |
 | `agentserver/handler/StateHandler.java` | `GET /state` |
+| `agentserver/handler/ObserveHandler.java` | `GET /observe` |
+| `agentserver/handler/CatalogHandler.java` | `GET /` and JSON 404 for unknown paths |
+| `agentserver/handler/AgentTrace.java` | Optional request trace to `~/.runelite/agent-trace.jsonl` |
+| `agentserver/handler/AgentLogs.java` | Recent chat, menu clicks, var changes and errors |
+| `agentserver/handler/RecentLog.java` | Bounded, cursor-addressed buffer used by `AgentLogs` |
+| `agentserver/handler/VarChangesHandler.java` | `GET /var-changes` |
+| `agentserver/handler/TileHandler.java` | `GET /tile` |
+| `agentserver/handler/PluginHubHandler.java` | `/plugins` endpoints |
+| `agentserver/handler/GrandExchangeHandler.java` | `/ge` endpoints |
+| `agentserver/handler/SkillsHandler.java` | `GET /skills` |
+| `agentserver/handler/VarbitHandler.java` | `GET /varbit` |
+| `agentserver/handler/VarpHandler.java` | `GET /varp` |
 | `agentserver/handler/InventoryHandler.java` | `/inventory` endpoints |
 | `agentserver/handler/NpcHandler.java` | `/npcs` endpoints |
 | `agentserver/handler/ObjectHandler.java` | `/objects` endpoints |
+| `agentserver/handler/GroundItemHandler.java` | `/ground-items` endpoints |
 | `agentserver/handler/WalkHandler.java` | `POST /walk` |
+| `agentserver/handler/PathHandler.java` | `GET /path`, `GET /path/active` |
 | `agentserver/handler/BankHandler.java` | `/bank` endpoints |
 | `agentserver/handler/DialogueHandler.java` | `/dialogue` endpoints |
-| `agentserver/handler/GroundItemHandler.java` | `/ground-items` endpoints |
-| `agentserver/handler/SkillsHandler.java` | `GET /skills` |
+| `agentserver/handler/KeyboardHandler.java` | `POST /keyboard` |
+| `agentserver/handler/SettingsHandler.java` | `/settings` endpoints |
+| `agentserver/handler/ScreenshotHandler.java` | `GET /screenshot` |
 | `agentserver/handler/LoginHandler.java` | `/login` endpoints |
+| `agentserver/handler/LogoutHandler.java` | `POST /logout` |
+| `agentserver/handler/ProfileHandler.java` | `/profiles` endpoints |
 | `agentserver/handler/ScriptHandler.java` | `/scripts` endpoints |
 | `agentserver/handler/ScriptSession.java` | Script execution session tracking |
 | `agentserver/handler/ScriptResultStore.java` | Static result store (Java API + HTTP) |
+| `agentserver/handler/ScriptHeartbeatRegistry.java` | Script loop heartbeats for `/scripts/health` |
+| `agentserver/handler/DynamicScriptDeployHandler.java` | `/scripts/deploy` endpoints |
+| `agentserver/handler/StateMachineDebugHandler.java` | `GET /debug/snapshot` |
+| `agentserver/handler/QuestHelperHandler.java` | `/quest-helper` endpoints |
+| `agentserver/scripting/*` | Compile, class-load and start deployed scripts |
+| `agentserver/uds/*` | HTTP/1.1 over a Unix domain socket |
 | `util/widget/Rs2WidgetInspector.java` | Widget tree inspection logic |
 | `microbot-cli` (repo root) | Bash CLI wrapper |
 
@@ -857,7 +1139,7 @@ All errors return JSON:
 |-------------|---------|
 | 200 | Success |
 | 400 | Bad request (missing/invalid parameters) |
-| 404 | Unknown sub-path |
+| 404 | Unknown endpoint or sub-path (an unknown top-level path lists the valid endpoints) |
 | 405 | Wrong HTTP method |
 | 500 | Internal server error |
 
@@ -873,4 +1155,9 @@ NPC/object/item interaction failures include a `reason` field:
 
 ## Security
 
-The server binds exclusively to `127.0.0.1` (loopback). It cannot be reached from other machines.
+- **Local only.** TCP mode binds to `127.0.0.1`. UDS mode creates `~/.runelite/agent/agent.sock` with `rw-------` and restricts the `~/.runelite/agent` directory to its owner.
+- **Trace file.** With *Trace requests* on, each request's method, path and query string, status, duration and body field names go to `~/.runelite/agent-trace.jsonl`, created `rw-------`. Body values (typed text, config values, script source, the token) are never written, but query strings are, so names you search for appear in it. Turning the setting off deletes the file and its `.1` rotation.
+- **Token.** Every request needs `X-Agent-Token`. The token is generated on first start, kept in the plugin config and written to `~/.runelite/.agent-token` (`rw-------`) by the client whose server is running; that client deletes it when its server stops. A second client that could not bind leaves the file alone. Clear the token in the plugin settings to rotate it.
+- **Browser and DNS-rebinding protection.** Requests with an `Origin` header, or a `Host` other than `127.0.0.1`, `localhost` or `[::1]`, are rejected.
+- **Opaque failures.** Every pre-auth rejection returns the same plain `404 Not Found` as a missing endpoint, so the API cannot be discovered without the token.
+- **Code execution.** `/scripts/deploy` compiles and runs Java from a local directory. Anyone holding the token can run code in the client.

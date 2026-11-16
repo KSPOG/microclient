@@ -8,18 +8,26 @@ import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCol
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionDoorMask;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionOverlay;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionPersistence;
+import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionRegion;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionSnapshot;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionView;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveRouteValidator;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static net.runelite.api.Constants.SCENE_SIZE;
 import static net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionSnapshot.FLAG_EAST;
 import static net.runelite.client.plugins.microbot.shortestpath.pathfinder.live.LiveCollisionSnapshot.FLAG_NORTH;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -148,6 +156,28 @@ public class LiveCollisionTest {
     }
 
     @Test
+    public void wallBesideAWallDoorIsLeftToTheStaticMap() {
+        int[][][] flags = openScene();
+        final int dx = 50, dy = 50;
+        flags[0][dx][dy] |= CollisionDataFlag.BLOCK_MOVEMENT_WEST | CollisionDataFlag.BLOCK_MOVEMENT_SOUTH;
+        flags[0][dx - 1][dy] |= CollisionDataFlag.BLOCK_MOVEMENT_EAST;
+        flags[0][dx][dy - 1] |= CollisionDataFlag.BLOCK_MOVEMENT_NORTH;
+
+        LiveCollisionDoorMask doorEdges = new LiveCollisionDoorMask(1);
+        doorEdges.markWall(0, dx, dy, 1, 0);
+        doorEdges.markWallFootprint(0, dx, dy);
+        LiveCollisionSnapshot snap = LiveCollisionCapture.build(BASE_X, BASE_Y, 1, flags, doorEdges);
+
+        assertEquals("the door's own edge stays routable",
+                Boolean.TRUE, snap.edge(BASE_X + dx - 1, BASE_Y + dy, 0, FLAG_EAST));
+        assertNull("a fixed wall sharing the door's tile must not be recorded as a doorway",
+                snap.edge(BASE_X + dx, BASE_Y + dy - 1, 0, FLAG_NORTH));
+        assertNull(snap.edge(BASE_X + dx, BASE_Y + dy, 0, FLAG_NORTH));
+        assertNull(snap.edge(BASE_X + dx, BASE_Y + dy, 0, FLAG_EAST));
+        assertEquals(Boolean.TRUE, snap.edge(BASE_X + dx, BASE_Y + dy + 1, 0, FLAG_NORTH));
+    }
+
+    @Test
     public void gameObjectDoorEdgesRecordedPassableWhenTilesStandable() {
         int[][][] flags = openScene();
         final int dx = 50, dy = 50;
@@ -252,6 +282,7 @@ public class LiveCollisionTest {
                 assertEquals(plain.isBlocked(x, y, 0), withEmptyOverlay.isBlocked(x, y, 0));
             }
         }
+        assertEquals(0L, withEmptyOverlay.getLiveEdgeQueries());
     }
 
     @Test
@@ -287,12 +318,19 @@ public class LiveCollisionTest {
         // overlay wins inside the scene
         assertTrue("precondition: static edge open", staticMap.n(tx, ty, 0));
         assertFalse("overlay must block the edge", live.n(tx, ty, 0));
+        assertEquals(1L, live.getLiveEdgeQueries());
 
         // a tile far outside the snapshot falls back to the static map
         int farX = baseX + 5000;
         int farY = baseY + 5000;
         assertEquals(staticMap.n(farX, farY, 0), live.n(farX, farY, 0));
         assertEquals(staticMap.e(farX, farY, 0), live.e(farX, farY, 0));
+        assertEquals("static fallback must not count as live evidence", 1L,
+                live.getLiveEdgeQueries());
+
+        live.beginSearch();
+        assertEquals("a new search resets the live evidence counter", 0L,
+                live.getLiveEdgeQueries());
     }
 
     // ---- Stage 3: route validation (LiveRouteValidator) ----
@@ -461,6 +499,31 @@ public class LiveCollisionTest {
         assertNotNull(view);
         assertEquals(Boolean.FALSE, view.edge(3252, 3252, 0, FLAG_NORTH));
         assertEquals(Boolean.TRUE, view.edge(3252, 3252, 0, FLAG_EAST));
+    }
+
+    @Test
+    public void persistenceDoesNotReuseAnotherWritersLockedTempFile() throws Exception {
+        Path dir = Files.createTempDirectory("lcr-locked-temp");
+        LiveCollisionOverlay overlay = new LiveCollisionOverlay();
+        overlay.setEnabled(true);
+        overlay.set(LiveCollisionCapture.build(BASE_X, BASE_Y, 1, openScene()));
+        Map<Integer, LiveCollisionRegion> dirty = overlay.drainDirty();
+        assertFalse(dirty.isEmpty());
+        int regionId = dirty.keySet().iterator().next();
+        Path occupiedTemp = dir.resolve(regionId + ".lcr.tmp");
+        byte[] marker = new byte[]{1, 2, 3, 4};
+        Files.write(occupiedTemp, marker);
+
+        try (FileChannel channel = FileChannel.open(occupiedTemp, StandardOpenOption.WRITE);
+             FileLock ignored = channel.lock()) {
+            LiveCollisionPersistence writer = new LiveCollisionPersistence(dir.toFile());
+            writer.persist(Map.of(regionId, dirty.get(regionId)));
+            writer.shutdown();
+            assertTrue("region should persist while another writer owns its temp file",
+                    Files.isRegularFile(dir.resolve(regionId + ".lcr")));
+        }
+        assertArrayEquals("another writer's temp file must remain untouched",
+                marker, Files.readAllBytes(occupiedTemp));
     }
 
     @Test

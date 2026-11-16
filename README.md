@@ -1,8 +1,5 @@
 ![image](https://github.com/user-attachments/assets/7c08e053-c84f-41f8-bc97-f55130100419)
 
-<a href="https://www.paypal.com/paypalme/MicrobotBE?country.x=BE" target="_blank">
-  <img src="https://img.shields.io/badge/Donate-%E2%9D%A4-ff69b4?style=for-the-badge">
-</a>
 <a href="https://www.youtube.com/@themicrobot" target="_blank">
   <img src="https://img.shields.io/badge/YouTube-Subscribe-FF0000?style=for-the-badge&logo=youtube&logoColor=white">
 </a>
@@ -22,6 +19,7 @@ This README is intentionally short. Durable details live in the docs below so hi
 - Build scripts safely: `runelite-client/src/main/java/net/runelite/client/plugins/microbot/AGENTS.md`
 - Use entity caches/queryables: `runelite-client/src/main/java/net/runelite/client/plugins/microbot/api/QUERYABLE_API.md`
 - Drive a running client: `docs/MICROBOT_CLI.md`
+- Hardware ID spoofing (opt-in via the launcher's Spoof hardware IDs checkbox; off for new installs, existing installs keep spoofing): `docs/DETECTION_HARDENING.md`, Phase 9
 
 ## Common Commands
 - Compile client: `./gradlew :client:compileJava`

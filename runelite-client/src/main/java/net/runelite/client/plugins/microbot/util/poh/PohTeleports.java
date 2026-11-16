@@ -9,10 +9,9 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.shortestpath.Transport;
-import net.runelite.client.plugins.microbot.shortestpath.TransportType;
 import net.runelite.client.plugins.microbot.util.equipment.JewelleryLocationEnum;
-import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
+import net.runelite.client.plugins.microbot.api.tileobject.Rs2ObjectIds;
+import net.runelite.client.plugins.microbot.util.walker.Rs2WalkerSceneObjects;
 import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.poh.data.HouseLocation;
@@ -45,14 +44,7 @@ public class PohTeleports {
      * @return
      */
     public static boolean isInHouse() {
-        if (!Rs2Player.IsInInstance()) return false;
-        // Use the tile-object cache rather than Rs2GameObject.getGameObject; the latter
-        // routes through Rs2Player.getWorldLocation() as a scene anchor which returns the
-        // overworld-template tile inside a POH instance and breaks the scene lookup.
-        return Microbot.getRs2TileObjectCache()
-                .query()
-                .withId(ObjectID.POH_EXIT_PORTAL)
-                .nearest() != null;
+        return PohPresence.isInHouse();
     }
 
     /**
@@ -99,7 +91,7 @@ public class PohTeleports {
         if (!checkIsInHouse()) return false;
 
         if (getJewelleryBoxInterface() == null) {
-            Rs2GameObject.interact(JewelleryBoxType.getObject(), "Teleport Menu");
+            Rs2WalkerSceneObjects.interact(JewelleryBoxType.getObject(), "Teleport Menu");
         }
 
         sleepUntil(() -> getJewelleryBoxInterface() != null);
@@ -160,7 +152,7 @@ public class PohTeleports {
         GameObject portal = findPohObjectAnywhere(NexusPortal.PORTAL_IDS);
         if (getPortalNexusInterface() == null) {
             if (portal != null) {
-                Rs2GameObject.interact(portal, "Teleport Menu");
+                Rs2WalkerSceneObjects.interact(portal, "Teleport Menu");
             } else {
                 log.warn("Portal nexus not found");
             }
@@ -216,28 +208,28 @@ public class PohTeleports {
         return true;
     }
 
-    private static final List<Integer> POH_SPIRIT_RING_IDS = Rs2GameObject.getObjectIdsByName("poh_spirit_ring");
+    private static final List<Integer> POH_SPIRIT_RING_IDS = Rs2ObjectIds.byName("poh_spirit_ring");
     private static final Set<Integer> FAIRY_RING_IDS = fairyRingIds();
     private static final Set<Integer> SPIRIT_TREE_IDS = spiritTreeIds();
 
     private static Set<Integer> fairyRingIds() {
         Set<Integer> ids = new LinkedHashSet<>(POH_SPIRIT_RING_IDS);
-        ids.addAll(Rs2GameObject.getObjectIdsByName("poh_fairy_ring"));
+        ids.addAll(Rs2ObjectIds.byName("poh_fairy_ring"));
         return ids;
     }
 
     private static Set<Integer> spiritTreeIds() {
         Set<Integer> ids = new LinkedHashSet<>(POH_SPIRIT_RING_IDS);
-        ids.addAll(Rs2GameObject.getObjectIdsByName("poh_spirit_tree"));
+        ids.addAll(Rs2ObjectIds.byName("poh_spirit_tree"));
         return ids;
     }
 
     public static GameObject getFairyRings() {
-        return Rs2GameObject.getGameObject(PohTeleports::isFairyRing);
+        return Rs2WalkerSceneObjects.firstNearPlayer(GameObject.class, PohTeleports::isFairyRing);
     }
 
     public static GameObject getSpiritTree() {
-        return Rs2GameObject.getGameObject(PohTeleports::isSpiritTree);
+        return Rs2WalkerSceneObjects.firstNearPlayer(GameObject.class, PohTeleports::isSpiritTree);
     }
 
     public static boolean isFairyRing(TileObject tileObject) {

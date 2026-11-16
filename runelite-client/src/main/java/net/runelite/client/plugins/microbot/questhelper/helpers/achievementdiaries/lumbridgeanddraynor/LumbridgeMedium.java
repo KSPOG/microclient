@@ -256,7 +256,7 @@ public class LumbridgeMedium extends ComplexStateQuestHelper
 			"Take the nearest fairy ring and travel to the Wizards' Tower (DIS).", fairyAccess.equipped());
 
 		claimReward = new NpcStep(this, NpcID.MIKASI_LUMBRIDGE_DIARY, new WorldPoint(3235, 3213, 0),
-			"Talk to Hatius Cosaintus in Lumbridge to claim your reward!");
+			"Talk to Mikasi in Lumbridge to claim your reward!");
 		claimReward.addDialogStep("I have a question about my Achievement Diary.");
 	}
 
