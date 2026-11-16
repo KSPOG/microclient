@@ -1,0 +1,23 @@
+name: Integrate Microbot 2.6.58
+on:
+  push:
+    branches: [update/microbot-2.6.58-walker-modes]
+permissions:
+  contents: read
+jobs:
+  merge:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 400
+          persist-credentials: false
+      - name: Merge pinned upstream and list overlaps
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=400 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16
+          git merge-base HEAD FETCH_HEAD
+          git -c user.name='Microclient integration' -c user.email='actions@users.noreply.github.com' \
+            merge --no-commit --no-ff FETCH_HEAD || true
+          git diff --name-only --diff-filter=U
+          git diff --stat --cached | tail -n 4
