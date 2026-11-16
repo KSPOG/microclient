@@ -23,23 +23,13 @@ jobs:
         id: source
         shell: bash
         run: |
-          git fetch --no-tags --depth=1 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16 055cb06ea04d6227569b05d669b96db922e2d522
+          git fetch --no-tags --depth=1 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16
           git config user.name 'Microclient integration'
           git config user.email 'actions@users.noreply.github.com'
-          ours=$(git commit-tree "4cdd7ab5fc95733c01b6a5866416c2f8105764ca^{tree}" -p 055cb06ea04d6227569b05d669b96db922e2d522 -m 'Fork snapshot')
-          theirs=$(git commit-tree "e3c0844dcd7d0e1214b7b24d111c5f3672f29c16^{tree}" -p 055cb06ea04d6227569b05d669b96db922e2d522 -m 'Upstream snapshot')
-          git switch --detach "$ours"
-          git merge --no-commit --no-ff "$theirs" || true
-          git diff --name-only -z --diff-filter=U > "$RUNNER_TEMP/conflicts"
-          while IFS= read -r -d '' file; do
-            if git cat-file -e "${theirs}:$file" 2>/dev/null; then
-              git checkout --theirs -- "$file"
-              git add -- "$file"
-            else
-              git rm -- "$file"
-            fi
-          done < "$RUNNER_TEMP/conflicts"
-          test -z "$(git ls-files -u)"
+          git reset --hard e3c0844dcd7d0e1214b7b24d111c5f3672f29c16
+          git rm -r --ignore-unmatch .github/workflows
+          git checkout 4cdd7ab5fc95733c01b6a5866416c2f8105764ca -- .github/workflows
+          git checkout 4cdd7ab5fc95733c01b6a5866416c2f8105764ca -- runelite-client/src/main/java/net/runelite/client/plugins/microbot/PluginConstants.java
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -53,6 +43,12 @@ jobs:
                       raise RuntimeError(f"{path}: expected one {before!r}")
                   source = source.replace(before, after)
               path.write_text(source)
+          ui = Path("runelite-client/src/main/java/net/runelite/client/ui/ClientUI.java")
+          source = ui.read_text()
+          old_index = "\t\t\t\tsidebarEntries.headSet(navBtn).size());"
+          if source.count(old_index) != 1:
+              raise RuntimeError("ClientUI sidebar insertion anchor changed")
+          ui.write_text(source.replace(old_index, "\t\t\t\tMath.min(sidebarEntries.headSet(navBtn).size(), sidebar.getTabCount()));"))
           PY
           grep -Fx 'microbot.version=2.6.58' gradle.properties
           grep -Fx 'project.build.version=1.13.6' gradle.properties
