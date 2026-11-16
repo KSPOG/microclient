@@ -29,7 +29,6 @@ jobs:
           git reset --hard e3c0844dcd7d0e1214b7b24d111c5f3672f29c16
           git rm -r --ignore-unmatch .github/workflows
           git checkout 4cdd7ab5fc95733c01b6a5866416c2f8105764ca -- .github/workflows
-          git checkout 4cdd7ab5fc95733c01b6a5866416c2f8105764ca -- runelite-client/src/main/java/net/runelite/client/plugins/microbot/PluginConstants.java
           python3 - <<'PY'
           import json
           from pathlib import Path
