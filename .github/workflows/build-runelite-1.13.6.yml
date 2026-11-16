@@ -9,6 +9,8 @@ permissions:
 
 jobs:
   build:
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -66,13 +68,31 @@ jobs:
           grep -Fx 'runelite.injected-client.version=1.13.6' gradle.properties
           git add -A
           git diff --cached --binary HEAD > "$RUNNER_TEMP/microclient-runelite-1.13.6.patch"
+      - name: Record exact source commit
+        id: source
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/KSPOG/microclient.git be0fd34afa68dd9683d770c0146c6a86d797d943
+          git rm -- ".github/workflows/build-runelite-1.13.6.yml"
+          build_date=$(git show -s --format=%cI "$GITHUB_SHA")
+          export GIT_AUTHOR_DATE="$build_date" GIT_COMMITTER_DATE="$build_date"
+          source_tree=$(git write-tree)
+          source_sha=$(git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$source_tree" -p be0fd34afa68dd9683d770c0146c6a86d797d943 \
+            -m 'Update Microbot to RuneLite 1.13.6')
+          git switch --detach "$source_sha"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
       - name: Build and smoke-test shaded client
         shell: bash
         run: |
-          bash ./gradlew :client:shadowJar
+          bash ./gradlew :client:shadowJar -Pmicrobot.commit.sha="$(git rev-parse HEAD)"
           mapfile -t jars < <(find runelite-client/build/libs -maxdepth 1 -name '*-shaded.jar')
           test "${#jars[@]}" -eq 1
           unzip -tq "${jars[0]}"
+          unzip -p "${jars[0]}" net/runelite/client/runelite.properties > "$RUNNER_TEMP/runelite-build.properties"
+          grep -Fx 'runelite.version=1.13.6' "$RUNNER_TEMP/runelite-build.properties"
+          grep -Fx "microbot.commit=$(git rev-parse HEAD)" "$RUNNER_TEMP/runelite-build.properties"
           timeout 30s java -jar "${jars[0]}" --help
           cp "${jars[0]}" "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6.jar"
       - uses: actions/upload-artifact@v4
@@ -82,3 +102,18 @@ jobs:
           path: |
             ${{ runner.temp }}/microbot-2.6.22-runelite-1.13.6.jar
             ${{ runner.temp }}/microclient-runelite-1.13.6.patch
+      - name: Publish verified JAR and source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUILT_SHA"
+          gh auth setup-git
+          git push origin "$BUILT_SHA:refs/heads/release/runelite-1.13.6"
+          gh release create microbot-2.6.22-runelite-1.13.6 \
+            "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6.jar" \
+            --repo "$GITHUB_REPOSITORY" --target "$BUILT_SHA" \
+            --title "Microbot 2.6.22 · RuneLite 1.13.6" \
+            --notes "Built from commit $BUILT_SHA on JDK 17. The shaded JAR passed ZIP integrity and java -jar --help checks." \
+            --latest=false
