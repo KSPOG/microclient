@@ -1,0 +1,47 @@
+name: Build Microbot door continuation update
+on:
+  push:
+    branches: [release/microbot-2.6.58-door-continuation]
+permissions:
+  contents: write
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - name: Build and verify the JAR
+        shell: bash
+        run: |
+          bash ./gradlew :client:shadowJar -Pmicrobot.commit.sha="$GITHUB_SHA"
+          mapfile -t jars < <(find runelite-client/build/libs -maxdepth 1 -name '*-shaded.jar')
+          test "${#jars[@]}" -eq 1
+          unzip -tq "${jars[0]}"
+          unzip -p "${jars[0]}" net/runelite/client/runelite.properties > "$RUNNER_TEMP/microbot.properties"
+          grep -Fx 'microbot.version=2.6.58' "$RUNNER_TEMP/microbot.properties"
+          grep -Fx "microbot.commit=$GITHUB_SHA" "$RUNNER_TEMP/microbot.properties"
+          timeout 30s java -jar "${jars[0]}" --help
+          cp "${jars[0]}" "$RUNNER_TEMP/microbot-2.6.58-runelite-1.13.6-door-continuation.jar"
+      - name: Run walker and door unit tests
+        run: bash ./gradlew :client:runUnitTests --tests '*Rs2WalkerUnitTest' --tests 'net.runelite.client.plugins.microbot.util.walker.door.*Test'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microbot-2.6.58-runelite-1.13.6-door-continuation
+          if-no-files-found: error
+          path: ${{ runner.temp }}/microbot-2.6.58-runelite-1.13.6-door-continuation.jar
+      - name: Publish the verified client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create microbot-2.6.58-runelite-1.13.6-door-continuation "$RUNNER_TEMP/microbot-2.6.58-runelite-1.13.6-door-continuation.jar" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title 'Microbot 2.6.58 · Web Walker door continuation' \
+            --notes 'Continue moving through ordinary doors and gates as soon as live collision confirms that the route edge opened. Includes all three Web Walker click modes.'

@@ -3196,16 +3196,15 @@ public class Rs2Walker {
 
             if (doorOrTransportResult && exit.isDoorLike()) {
                 boolean canvasNudged = maybeCanvasNudgeAfterDoor(target, distance, path);
-                // Arm after nudge returns so the window does not expire during in-nudge waits. The long
-                // window exists to stop a minimap click landing on the heels of a CANVAS click, so it is
-                // only owed when a canvas click actually happened — and the nudge deliberately declines
-                // mid-route (see its final-approach guard), which is every ordinary door. Arming it
-                // regardless froze movement for 2.2s after each one, and the idle nudge then supplied a
-                // minimap click anyway: slower AND still minimap. Measured at Falador castle, door done
-                // 15:25:46, idle nudge 15:25:48. The short window still keeps the next beat off the same
-                // tick as the door interaction itself.
-                routeState.suppressTryDirectShortWalkUntilMs = System.currentTimeMillis()
-                        + (canvasNudged ? POST_DOOR_NUDGE_SUPPRESS_TRY_DIRECT_MS : POST_DOOR_NO_NUDGE_SUPPRESS_TRY_DIRECT_MS);
+                if (canvasNudged) {
+                    routeState.suppressTryDirectShortWalkUntilMs =
+                            System.currentTimeMillis() + POST_DOOR_NUDGE_SUPPRESS_TRY_DIRECT_MS;
+                } else if (isDoorInteractionSettling()) {
+                    routeState.suppressTryDirectShortWalkUntilMs =
+                            System.currentTimeMillis() + POST_DOOR_NO_NUDGE_SUPPRESS_TRY_DIRECT_MS;
+                } else {
+                    routeState.suppressTryDirectShortWalkUntilMs = 0L;
+                }
                 WorldPoint plAfterDoor = Rs2Player.getWorldLocation();
                 if (!path.isEmpty() && plAfterDoor != null && target != null) {
                     WorldPoint pathLastDoor = path.get(path.size() - 1);
@@ -5723,6 +5722,7 @@ public class Rs2Walker {
 					compactWorldPoint(bestLoc), compactWorldPoint(bestFrom), compactWorldPoint(bestTo));
 			return false;
 		}
+        boolean waitForBlockedEdge = shouldWaitForDoorOpening(bestAction, bestFrom, bestTo);
 		markDoorAttempt(bestLoc, bestFrom, bestTo);
 		markGlobalDoorInteractionCooldown();
 		WorldPoint posBefore = Rs2Player.getWorldLocation();
@@ -5750,7 +5750,15 @@ public class Rs2Walker {
 			return false;
 		}
         markDoorInteractionSettling(bestTo);
-		waitForDoorInteractionProgress(bestFrom, bestTo);
+        if (waitForBlockedEdge) {
+            if (waitForDoorInteractionProgress(bestFrom, bestTo, bestLoc,
+                    List.of("open"), bestAction, best, true)) {
+                continueThroughOpenedDoor(best, bestLoc, bestAction, bestFrom, bestTo, path);
+                return true;
+            }
+        } else {
+            waitForDoorInteractionProgress(bestFrom, bestTo);
+        }
 		WorldPoint posAfter = Rs2Player.getWorldLocation();
 		boolean traversed = didTraverseInteractedDoor(posBefore, posAfter, bestLoc, bestFrom, bestTo);
 		if (traversed) {

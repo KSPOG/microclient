@@ -120,20 +120,32 @@ public final class Rs2WalkerAwaits {
                                                     java.util.function.Supplier<String> doorObservation,
                                                     java.util.function.BooleanSupplier cancelled,
                                                     java.util.function.BooleanSupplier doorCrossed) {
+        awaitDoorInteractionProgress(ticket, fromWp, toWp, doorOpened, doorObservation, cancelled, doorCrossed, false);
+    }
+
+    /** Returns whether the previously blocked walking edge was observed open. */
+    public static boolean awaitDoorInteractionProgress(AwaitTicket ticket, WorldPoint fromWp, WorldPoint toWp,
+                                                       java.util.function.BooleanSupplier doorOpened,
+                                                       java.util.function.Supplier<String> doorObservation,
+                                                       java.util.function.BooleanSupplier cancelled,
+                                                       java.util.function.BooleanSupplier doorCrossed,
+                                                       boolean waitForBlockedEdge) {
         if (ticket == null) {
-            return;
+            return false;
         }
         long startPhaseAt = System.currentTimeMillis();
-        sleepUntil(() -> {
-            if (Thread.currentThread().isInterrupted() || conversationOpened()) {
-                return true;
-            }
-            WorldPoint now = Rs2Player.getWorldLocation();
-            if (ticket.beforePosition() != null && now != null && !ticket.beforePosition().equals(now)) {
-                return true;
-            }
-            return Rs2Player.isMoving() || Rs2Player.isAnimating() || isDoorEdgeResolved(fromWp, toWp);
-        }, DOOR_INTERACTION_START_WAIT_MS);
+        if (!waitForBlockedEdge) {
+            sleepUntil(() -> {
+                if (Thread.currentThread().isInterrupted() || conversationOpened()) {
+                    return true;
+                }
+                WorldPoint now = Rs2Player.getWorldLocation();
+                if (ticket.beforePosition() != null && now != null && !ticket.beforePosition().equals(now)) {
+                    return true;
+                }
+                return Rs2Player.isMoving() || Rs2Player.isAnimating() || isDoorEdgeResolved(fromWp, toWp);
+            }, DOOR_INTERACTION_START_WAIT_MS);
+        }
         long startWaitMs = System.currentTimeMillis() - startPhaseAt;
 
         // Which condition releases the traversal wait is the whole question for door latency: it
@@ -181,7 +193,11 @@ public final class Rs2WalkerAwaits {
             if (now == null) {
                 return false;
             }
-            boolean edgeResolved = !ranged && isDoorEdgeResolved(fromWp, toWp);
+            if (waitForBlockedEdge && Rs2Tile.isEdgePassable(fromWp, toWp)) {
+                releasedBy[0] = "door-edge-open";
+                return true;
+            }
+            boolean edgeResolved = !waitForBlockedEdge && !ranged && isDoorEdgeResolved(fromWp, toWp);
             if (edgeResolved) {
                 releasedBy[0] = "edge-resolved";
                 return true;
@@ -195,7 +211,8 @@ public final class Rs2WalkerAwaits {
             // the premature release — but "past" is unambiguous, and it is how a hold ends when the
             // server walks us to the far side through another opening without the door ever needing to
             // open. Measured as a 6.9s ranged timeout with the player standing on toWp, door shut.
-            if (ranged && (now.equals(toWp) || Rs2DoorGeometry.crossedDoorAxis(fromWp, toWp, now))) {
+            if ((ranged || waitForBlockedEdge)
+                    && (now.equals(toWp) || Rs2DoorGeometry.crossedDoorAxis(fromWp, toWp, now))) {
                 releasedBy[0] = "passed-door";
                 return true;
             }
@@ -203,7 +220,7 @@ public final class Rs2WalkerAwaits {
             // server-driven, so an opened door clears its block on that tick, whatever its menu says.
             // Throttled because the fallback is a scene scan, not a field read.
             long nowMs = System.currentTimeMillis();
-            if (shouldPollDoorOpen(nowMs - traversalPhaseAt, nowMs - lastOpenPollAt[0])) {
+            if (!waitForBlockedEdge && shouldPollDoorOpen(nowMs - traversalPhaseAt, nowMs - lastOpenPollAt[0])) {
                 lastOpenPollAt[0] = nowMs;
                 openPolls[0]++;
                 boolean edgeOpen = Rs2Tile.isEdgePassable(fromWp, toWp);
@@ -222,11 +239,11 @@ public final class Rs2WalkerAwaits {
                     return true;
                 }
             }
-            if (!ranged && Rs2WalkerProgress.isWithinChebyshev(now, toWp, 1)) {
+            if (!waitForBlockedEdge && !ranged && Rs2WalkerProgress.isWithinChebyshev(now, toWp, 1)) {
                 releasedBy[0] = "arrived-far-side";
                 return true;
             }
-            if (!ranged && hasMeaningfulDoorProgress(ticket.beforePosition(), now, fromWp, toWp)) {
+            if (!waitForBlockedEdge && !ranged && hasMeaningfulDoorProgress(ticket.beforePosition(), now, fromWp, toWp)) {
                 releasedBy[0] = "progress";
                 return true;
             }
@@ -265,6 +282,7 @@ public final class Rs2WalkerAwaits {
                     releasedBy[0], startWaitMs, traversalWaitMs, clickDistance, ranged, openPolls[0], lastEdge[0],
                     totalPolls[0], movingPolls[0], animatingPolls[0], saw, fromWp, toWp);
         }
+        return waitForBlockedEdge && "door-edge-open".equals(releasedBy[0]);
     }
 
     /**

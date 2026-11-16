@@ -182,7 +182,7 @@ final class Rs2WalkerDoors {
         if (p == null || goal.getPlane() != p.getPlane()) {
             return false;
         }
-        if (isWalkCancelled(goal)) {
+        if (isWalkCancelled(goal) || Rs2Player.isMoving() || Rs2Player.isAnimating()) {
             return false;
         }
         WorldPoint pathLast = path.get(path.size() - 1);
@@ -896,6 +896,7 @@ final class Rs2WalkerDoors {
                         }
                         markDoorAttempt(probe, fromWp, toWp);
                         markGlobalDoorInteractionCooldown();
+                        boolean waitForBlockedEdge = shouldWaitForDoorOpening(action, fromWp, toWp);
                         WorldPoint posBefore = Rs2Player.getWorldLocation();
                         boolean interacted;
                         try {
@@ -911,7 +912,10 @@ final class Rs2WalkerDoors {
                             return false;
                         }
                         markDoorInteractionSettling(toWp);
-                        waitForDoorInteractionProgress(fromWp, toWp, probe, doorActions, action, object);
+                        if (waitForDoorInteractionProgress(fromWp, toWp, probe, doorActions, action, object, waitForBlockedEdge)) {
+                            continueThroughOpenedDoor(object, probe, action, fromWp, toWp, path);
+                            return true;
+                        }
                         WorldPoint posAfter = Rs2Player.getWorldLocation();
                         boolean traversed = didTraverseInteractedDoor(posBefore, posAfter, probe, fromWp, toWp);
                         if (!traversed && isQuestLockedDoorDialogue()) {
@@ -1059,6 +1063,7 @@ final class Rs2WalkerDoors {
         }
         markDoorAttempt(probe, fromWp, toWp);
         markGlobalDoorInteractionCooldown();
+        boolean waitForBlockedEdge = shouldWaitForDoorOpening(action, fromWp, toWp);
         WorldPoint posBefore = Rs2Player.getWorldLocation();
         boolean interacted;
         try {
@@ -1074,7 +1079,10 @@ final class Rs2WalkerDoors {
             return false;
         }
         markDoorInteractionSettling(toWp);
-        waitForDoorInteractionProgress(fromWp, toWp, probe, doorActions, action, object);
+        if (waitForDoorInteractionProgress(fromWp, toWp, probe, doorActions, action, object, waitForBlockedEdge)) {
+            continueThroughOpenedDoor(object, probe, action, fromWp, toWp, routePath);
+            return true;
+        }
         WorldPoint posAfter = Rs2Player.getWorldLocation();
         boolean traversed = didTraverseInteractedDoor(posBefore, posAfter, probe, fromWp, toWp);
         if (traversed) {
@@ -1425,7 +1433,8 @@ final class Rs2WalkerDoors {
 
     static boolean tryDoorEdgeCrossNudgeInner(WorldPoint fromWp, WorldPoint toWp, WorldPoint target,
                                                       List<WorldPoint> routePath) {
-        if (fromWp == null || toWp == null || fromWp.getPlane() != toWp.getPlane()) {
+        if (fromWp == null || toWp == null || fromWp.getPlane() != toWp.getPlane()
+                || (target != null && isWalkCancelled(target))) {
             return false;
         }
         WorldPoint before = Rs2Player.getWorldLocation();
@@ -1915,6 +1924,34 @@ final class Rs2WalkerDoors {
     static void waitForDoorInteractionProgress(WorldPoint fromWp, WorldPoint toWp,
                                                        WorldPoint probe, List<String> doorActions,
                                                        String action, TileObject object) {
+        waitForDoorInteractionProgress(fromWp, toWp, probe, doorActions, action, object, false);
+    }
+
+    static boolean shouldWaitForDoorOpening(String action, WorldPoint fromWp, WorldPoint toWp) {
+        return "open".equalsIgnoreCase(action)
+                && fromWp != null && toWp != null
+                && fromWp.getPlane() == toWp.getPlane()
+                && fromWp.distanceTo2D(toWp) == 1
+                && !Rs2Tile.isEdgePassable(fromWp, toWp)
+                && "blocked".equals(Rs2Tile.lastEdgeDecision());
+    }
+
+    static void continueThroughOpenedDoor(TileObject object, WorldPoint probe, String action,
+                                          WorldPoint fromWp, WorldPoint toWp, List<WorldPoint> path) {
+        doorAttemptLedger.endSettleEarly();
+        clearDoorCrossFailures(fromWp, toWp);
+        markStationaryDoorOpened(probe);
+        markNearbyDoorFamilyOpened(object, probe, action, SEGMENT_DOOR_FAMILY_MARK_RADIUS);
+        WorldPoint target = currentTarget;
+        WebWalkLog.spDebug("door_open_confirmed | from={} to={}", compactWorldPoint(fromWp), compactWorldPoint(toWp));
+        if (target != null) {
+            tryDoorEdgeCrossNudge(fromWp, toWp, target, path);
+        }
+    }
+
+    static boolean waitForDoorInteractionProgress(WorldPoint fromWp, WorldPoint toWp,
+                                                  WorldPoint probe, List<String> doorActions,
+                                                  String action, TileObject object, boolean waitForBlockedEdge) {
         long startedAt = System.currentTimeMillis();
         AwaitTicket ticket = Rs2WalkerAwaits.beginTicket();
         java.util.function.BooleanSupplier doorOpened =
@@ -1957,7 +1994,8 @@ final class Rs2WalkerDoors {
             };
         }
         try {
-            Rs2WalkerAwaits.awaitDoorInteractionProgress(ticket, fromWp, toWp, doorOpened, observation, cancelled, doorCrossed);
+            return Rs2WalkerAwaits.awaitDoorInteractionProgress(ticket, fromWp, toWp,
+                    doorOpened, observation, cancelled, doorCrossed, waitForBlockedEdge);
         } finally {
             long tookMs = System.currentTimeMillis() - startedAt;
             if (rawScanWallSnapshot != null || rawScanGameObjectSnapshot != null) {
