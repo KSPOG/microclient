@@ -193,9 +193,14 @@ public final class Rs2WalkerAwaits {
             if (now == null) {
                 return false;
             }
-            if (waitForBlockedEdge && Rs2Tile.isEdgePassable(fromWp, toWp)) {
-                releasedBy[0] = "door-edge-open";
-                return true;
+            if (waitForBlockedEdge) {
+                openPolls[0]++;
+                boolean edgeOpen = Rs2Tile.isEdgePassable(fromWp, toWp);
+                lastEdge[0] = Rs2Tile.lastEdgeDecision();
+                if (edgeOpen) {
+                    releasedBy[0] = "door-edge-open";
+                    return true;
+                }
             }
             boolean edgeResolved = !waitForBlockedEdge && !ranged && isDoorEdgeResolved(fromWp, toWp);
             if (edgeResolved) {

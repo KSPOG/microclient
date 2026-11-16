@@ -1939,7 +1939,6 @@ final class Rs2WalkerDoors {
     static void continueThroughOpenedDoor(TileObject object, WorldPoint probe, String action,
                                           WorldPoint fromWp, WorldPoint toWp, List<WorldPoint> path) {
         doorAttemptLedger.endSettleEarly();
-        clearDoorCrossFailures(fromWp, toWp);
         markStationaryDoorOpened(probe);
         markNearbyDoorFamilyOpened(object, probe, action, SEGMENT_DOOR_FAMILY_MARK_RADIUS);
         WorldPoint target = currentTarget;

@@ -4,10 +4,21 @@ on:
     branches: [release/microbot-2.6.58-door-continuation]
 permissions:
   contents: write
+  actions: write
 jobs:
   package:
     runs-on: ubuntu-24.04
     steps:
+      - name: Stop the superseded build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          route="repos/$GITHUB_REPOSITORY/actions/runs/43973984859"
+          if [ "$(gh api "$route" --jq .status)" != completed ]; then
+            if ! gh api -X POST "$route/cancel"; then
+              test "$(gh api "$route" --jq .status)" = completed
+            fi
+          fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
