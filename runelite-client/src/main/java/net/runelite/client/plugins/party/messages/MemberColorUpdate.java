@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, LlemonDuck <napkinorton@gmail.com>
+ * Copyright (c) 2026, Adam <Adam@sigterm.info>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -22,32 +22,18 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package net.runelite.gradle.component;
+package net.runelite.client.plugins.party.messages;
 
-import org.gradle.api.Plugin;
-import org.gradle.api.Project;
-import org.gradle.api.tasks.SourceSet;
-import org.gradle.api.tasks.SourceSetContainer;
-import org.gradle.api.tasks.TaskProvider;
+import java.awt.Color;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import net.runelite.client.party.messages.PartyMemberMessage;
 
-public class ComponentPlugin implements Plugin<Project>
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class MemberColorUpdate extends PartyMemberMessage
 {
-
-	@Override
-	public void apply(Project project)
-	{
-		TaskProvider<ComponentTask> packComponents = project.getTasks()
-			.register("packComponents", ComponentTask.class, (task) -> task.setGroup("build"));
-
-		project.getTasks()
-			.getByName("compileJava")
-			.dependsOn(packComponents);
-
-		project.getExtensions()
-			.getByType(SourceSetContainer.class)
-			.getByName(SourceSet.MAIN_SOURCE_SET_NAME)
-			.getJava()
-			.srcDir(packComponents.map(ComponentTask::getOutputDirectory));
-	}
-
+	private Color color;
 }

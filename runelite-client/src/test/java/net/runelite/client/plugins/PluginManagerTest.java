@@ -109,7 +109,7 @@ public class PluginManagerTest
 		Injector injector = Guice.createInjector(Modules
 			.override(new RuneLiteModule(okHttpClient, () -> null, configLoader, true, false, false, true,
 				RuneLite.DEFAULT_SESSION_FILE,
-				null, false, false
+				null, null, false, false
 			))
 			.with(BoundFieldModule.of(this)));
 
@@ -139,7 +139,7 @@ public class PluginManagerTest
 	@Test
 	public void testLoadPlugins() throws Exception
 	{
-		var pluginManager = new PluginManager(false, null, null, null, null);
+		var pluginManager = new PluginManager(false, false, null, null, null, null, new PluginModuleFactory());
 		pluginManager.loadCorePlugins();
 		var plugins = pluginManager.getPlugins();
 
@@ -160,7 +160,7 @@ public class PluginManagerTest
 	@Ignore
 	public void dumpGraph() throws Exception
 	{
-		PluginManager pluginManager = new PluginManager(false, null, null, null, null);
+		PluginManager pluginManager = new PluginManager(true, false, null, null, null, null, new PluginModuleFactory());
 		pluginManager.loadCorePlugins();
 
 		Injector graphvizInjector = Guice.createInjector(new GraphvizModule());

@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.util.grandexchange;
 
+import com.google.common.primitives.Ints;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -1133,8 +1134,8 @@ public class Rs2GrandExchange {
                 offer.getItemId(),
                 offer.getQuantitySold(),
                 offer.getTotalQuantity(),
-                offer.getPrice(),
-                offer.getSpent(),
+                Ints.saturatedCast(offer.getPrice()),
+                Ints.saturatedCast(offer.getSpent()),
                 offer.getState(),
                 isSelling,
                 slot

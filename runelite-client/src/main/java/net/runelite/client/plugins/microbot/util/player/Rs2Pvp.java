@@ -25,6 +25,7 @@ package net.runelite.client.plugins.microbot.util.player;/*
  */
 
 
+import com.google.common.primitives.Ints;
 import net.runelite.api.*;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.geometry.Cuboid;
@@ -186,14 +187,14 @@ public class Rs2Pvp {
         TreeMap<Integer, Item> priceMap = new TreeMap<>(Comparator.comparingInt(Integer::intValue));
         int wealth = 0;
         for (Item i : items) {
-            int value = (itemManager.getItemPrice(i.getId()) * i.getQuantity());
+            int value = Ints.saturatedCast(itemManager.getItemPrice(i.getId()) * i.getQuantity());
 
             final ItemComposition itemComposition = itemManager.getItemComposition(i.getId());
             if (!itemComposition.isTradeable() && value == 0) {
                 value = itemComposition.getPrice() * i.getQuantity();
                 priceMap.put(value, i);
             } else {
-                value = itemManager.getItemPrice(i.getId()) * i.getQuantity();
+                value = Ints.saturatedCast(itemManager.getItemPrice(i.getId()) * i.getQuantity());
                 if (i.getId() > 0 && value > 0) {
                     priceMap.put(value, i);
                 }

@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2019, Tomas Slusny <slusnucky@gmail.com>
- * Copyright (c) 2021, Jonathan Rousseau <https://github.com/JoRouss>
+ * Copyright (c) 2026 Abex
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -23,30 +22,26 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package net.runelite.client.plugins.party.data;
+package net.runelite.client.plugins;
 
-import java.awt.Color;
-import lombok.Getter;
+import com.google.inject.AbstractModule;
+import javax.inject.Singleton;
 import lombok.RequiredArgsConstructor;
-import lombok.Setter;
-import net.runelite.client.ui.overlay.components.PanelComponent;
-import net.runelite.client.ui.overlay.worldmap.WorldMapPoint;
 
-@Setter
-@Getter
-@RequiredArgsConstructor
-public class PartyData
+@Singleton
+class PluginModuleFactory
 {
-	private final long memberId;
-	private final WorldMapPoint worldMapPoint;
-	private final PanelComponent panel = new PanelComponent();
-	private Color color = Color.WHITE;
+	@RequiredArgsConstructor
+	class PluginModule extends AbstractModule
+	{
+		private final Plugin plugin;
 
-	private int hitpoints;
-	private int maxHitpoints;
-	private int prayer;
-	private int maxPrayer;
-	private int runEnergy;
-	private int specEnergy;
-	private boolean vengeanceActive;
+		@Override
+		protected void configure()
+		{
+			// Since the plugin itself is a module, it won't bind itself, so we'll bind it here
+			binder().bind((Class<Plugin>) plugin.getClass()).toInstance(plugin);
+			binder().install(plugin);
+		}
+	}
 }

@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.api.tileitem.models;
 
+import com.google.common.primitives.Ints;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
@@ -138,7 +139,7 @@ public class Rs2TileItemModel implements TileItem, IEntity {
         return Microbot.getClientThread().invoke((Supplier<Boolean>) () -> {
             ItemComposition itemComposition = Microbot.getClient().getItemDefinition(tileItem.getId());
             int highAlchValue = itemComposition.getPrice() * 60 / 100;
-            int marketPrice = Microbot.getItemManager().getItemPrice(itemComposition.getId());
+            long marketPrice = Microbot.getItemManager().getItemPrice(itemComposition.getId());
             return marketPrice > highAlchValue;
         });
     }
@@ -185,8 +186,8 @@ public class Rs2TileItemModel implements TileItem, IEntity {
     public int getTotalValue() {
         return Microbot.getClientThread().invoke(() -> {
             ItemComposition itemComposition = Microbot.getClient().getItemDefinition(tileItem.getId());
-            int price = Microbot.getItemManager().getItemPrice(itemComposition.getId());
-            return price * tileItem.getQuantity();
+            long price = Microbot.getItemManager().getItemPrice(itemComposition.getId());
+            return Ints.saturatedCast(price * tileItem.getQuantity());
         });
     }
 

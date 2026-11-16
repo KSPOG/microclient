@@ -196,13 +196,13 @@ public class ObjectLoader
 		{
 			def.setAmbient(is.readByte());
 		}
-		else if (opcode == 39)
-		{
-			def.setContrast(is.readByte() * 25);
-		}
 		else if (opcode >= 30 && opcode < 35)
 		{
 			entityOpsLoader.decodeOp(def.getOps(), is, opcode - 30);
+		}
+		else if (opcode == 39)
+		{
+			def.setContrast(is.readByte() * 25);
 		}
 		else if (opcode == 40)
 		{
@@ -233,6 +233,10 @@ public class ObjectLoader
 
 			def.setRetextureToFind(retextureToFind);
 			def.setTextureToReplace(textureToReplace);
+		}
+		else if (opcode == 42)
+		{
+			def.setFullRecolor((short) is.readUnsignedShort());
 		}
 		else if (opcode == 61)
 		{
@@ -290,38 +294,6 @@ public class ObjectLoader
 		{
 			def.setSupportsItems(is.readUnsignedByte());
 		}
-		else if (opcode == 77)
-		{
-			int varpID = is.readUnsignedShort();
-			if (varpID == 0xFFFF)
-			{
-				varpID = -1;
-			}
-			def.setVarbitID(varpID);
-
-			int configId = is.readUnsignedShort();
-			if (configId == 0xFFFF)
-			{
-				configId = -1;
-			}
-			def.setVarpID(configId);
-
-			int length = is.readUnsignedByte();
-			int[] configChangeDest = new int[length + 2];
-
-			for (int index = 0; index <= length; ++index)
-			{
-				configChangeDest[index] = is.readUnsignedShort();
-				if (0xFFFF == configChangeDest[index])
-				{
-					configChangeDest[index] = -1;
-				}
-			}
-
-			configChangeDest[length + 1] = -1;
-
-			def.setConfigChangeDest(configChangeDest);
-		}
 		else if (opcode == 78)
 		{
 			def.setAmbientSoundId(is.readUnsignedShort());
@@ -370,7 +342,7 @@ public class ObjectLoader
 		{
 			def.setSoundDistanceFadeCurve(is.readUnsignedByte());
 		}
-		else if (opcode == 92)
+		else if (opcode == 77 || opcode == 92)
 		{
 			int varpID = is.readUnsignedShort();
 			if (varpID == 0xFFFF)
@@ -386,11 +358,14 @@ public class ObjectLoader
 			}
 			def.setVarpID(configId);
 
-
-			int var = is.readUnsignedShort();
-			if (var == 0xFFFF)
+			int var = -1;
+			if (opcode == 92)
 			{
-				var = -1;
+				var = is.readUnsignedShort();
+				if (var == 0xFFFF)
+				{
+					var = -1;
+				}
 			}
 
 			int length = is.readUnsignedByte();
@@ -427,6 +402,40 @@ public class ObjectLoader
 		else if (opcode == 96)
 		{
 			def.setRaise(is.readUnsignedByte());
+		}
+		else if (opcode == 97 || opcode == 98)
+		{
+			int varpID = is.readUnsignedShort();
+			if (varpID == 0xFFFF)
+			{
+				varpID = -1;
+			}
+			def.setVarbitID(varpID);
+
+			int configId = is.readUnsignedShort();
+			if (configId == 0xFFFF)
+			{
+				configId = -1;
+			}
+			def.setVarpID(configId);
+
+			int var = -1;
+			if (opcode == 98)
+			{
+				var = is.readSigned24BitInt();
+			}
+
+			int length = is.readUnsignedByte();
+			int[] configChangeDest = new int[length + 2];
+
+			for (int index = 0; index <= length; ++index)
+			{
+				configChangeDest[index] = is.readSigned24BitInt();
+			}
+
+			configChangeDest[length + 1] = var;
+
+			def.setConfigChangeDest(configChangeDest);
 		}
 		else if (opcode == 100)
 		{

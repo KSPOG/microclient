@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.util.inventory;
 
+import com.google.common.primitives.Ints;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -251,8 +252,8 @@ public class Rs2ItemModel {
     }
 
     public int getPrice() {
-        return Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getItemManager().getItemPrice(id) * quantity).orElse(0);
+        return Ints.saturatedCast(Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getItemManager().getItemPrice(id) * quantity).orElse(0L));
     }
 
     public int getHaPrice() {
@@ -260,8 +261,8 @@ public class Rs2ItemModel {
     }
 
     public boolean isHaProfitable() {
-        int natureRunePrice = Microbot.getClientThread().runOnClientThreadOptional(() ->
-                Microbot.getItemManager().getItemPrice(ItemID.NATURERUNE)).orElse(0);
+        long natureRunePrice = Microbot.getClientThread().runOnClientThreadOptional(() ->
+                Microbot.getItemManager().getItemPrice(ItemID.NATURERUNE)).orElse(0L);
         return (getHaPrice() - natureRunePrice) > (getPrice() / quantity) && isTradeable;
 
     }

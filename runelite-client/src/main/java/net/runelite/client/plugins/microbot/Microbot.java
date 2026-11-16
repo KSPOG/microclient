@@ -402,7 +402,7 @@ public class Microbot {
             rsWorld.setAddress(newWorld.getAddress());
             rsWorld.setId(newWorld.getId());
             rsWorld.setPlayerCount(newWorld.getPlayers());
-            rsWorld.setLocation(newWorld.getLocation());
+            rsWorld.setLocation(newWorld.getRegion().getId());
             rsWorld.setTypes(WorldUtil.toWorldTypes(newWorld.getTypes()));
 
             Microbot.getClient().openWorldHopper();

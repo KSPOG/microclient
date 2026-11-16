@@ -134,6 +134,7 @@ public enum HiscoreSkill
 	THE_WHISPERER("The Whisperer", BOSS, SpriteID.IconBoss25x25.THE_WHISPERER),
 	THEATRE_OF_BLOOD("Theatre of Blood", BOSS, SpriteID.IconBoss25x25.THEATRE_OF_BLOOD),
 	THEATRE_OF_BLOOD_HARD_MODE("Theatre of Blood: Hard Mode", BOSS, SpriteID.IconBoss25x25.THEATRE_OF_BLOOD),
+	THE_FRACTURED_ARCHIVE("The Fractured Archive", BOSS, SpriteID.IconBoss25x25.THE_FRACTURED_ARCHIVE),
 	THERMONUCLEAR_SMOKE_DEVIL("Thermonuclear Smoke Devil", BOSS, SpriteID.IconBoss25x25.THERMONUCLEAR_SMOKE_DEVIL),
 	TOMBS_OF_AMASCUT("Tombs of Amascut", BOSS, SpriteID.IconBoss25x25.TOMBS_OF_AMASCUT),
 	TOMBS_OF_AMASCUT_EXPERT("Tombs of Amascut: Expert Mode", BOSS, SpriteID.IconBoss25x25.TOMBS_OF_AMASCUT_EXPERT),
