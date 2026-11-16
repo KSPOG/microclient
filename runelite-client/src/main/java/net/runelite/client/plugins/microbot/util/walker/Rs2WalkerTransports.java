@@ -19,6 +19,7 @@ import net.runelite.client.plugins.devtools.MovementFlag;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.shortestpath.*;
+import net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.bank.enums.BankLocation;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
@@ -923,6 +924,10 @@ final class Rs2WalkerTransports {
                         WebWalkLog.spInfo("transport_object_scan | slow scanMs={} objectId={} candidatesAtTile={} matches={} origin={}",
                                 objectScanMs, transportObjectId, 1, objects.size(),
                                 compactWorldPoint(transport.getOrigin()));
+                    }
+                    if (walkerClickMode() == ShortestPathConfig.WalkerClickMode.MINIMAP_ONLY
+                            && Boolean.TRUE.equals(SERVER_APPROACH_ALLOWED.get())) {
+                        objects.removeIf(object -> !isRouteObjectOnCanvas(object));
                     }
                     TileObject object = objects.stream().findFirst().orElse(null);
                     if (object instanceof GroundObject) {

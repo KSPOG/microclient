@@ -337,14 +337,15 @@ final class Rs2WalkerMovement {
             return null;
         }
         if (mode == WalkerClickMode.MINIMAP_ONLY) {
-            if (walkMiniMap(target)) {
+            if (!target.equals(Rs2Walker.getCurrentTarget()) && walkMiniMap(target)) {
                 return target;
             }
             WorldPoint mapTarget = walkRawPathMiniMapTargetToward(rawPath, target, playerLoc, maxEuclidean, rawAnchorIndex);
             if (mapTarget != null) {
                 return mapTarget;
             }
-            return allowDirectionalFallback && walkMiniMapToward(target, playerLoc, maxEuclidean) ? target : null;
+            return allowDirectionalFallback && !target.equals(Rs2Walker.getCurrentTarget())
+                    && walkMiniMapToward(target, playerLoc, maxEuclidean) ? target : null;
         }
         if (!Objects.equals(routeClickSessionTarget, Rs2Walker.getCurrentTarget())) {
             routeClickSessionTarget = Rs2Walker.getCurrentTarget();
@@ -1004,7 +1005,21 @@ final class Rs2WalkerMovement {
     }
 
     static boolean dispatchSceneWalk(WorldPoint worldPoint) {
-        if (worldPoint == null || walkerClickMode() == WalkerClickMode.MINIMAP_ONLY) {
+        return dispatchSceneWalk(worldPoint, false);
+    }
+
+    static boolean walkCanvasDestination(WorldPoint goal, WorldPoint pathEnd, WorldPoint player) {
+        if (walkerClickMode() != WalkerClickMode.MINIMAP_ONLY || goal == null || !goal.equals(pathEnd)
+                || player == null || player.getPlane() != goal.getPlane() || player.equals(goal)
+                || !Rs2Tile.isTileReachable(goal) || isWalkCancelled(goal)) {
+            return false;
+        }
+        requestAutoRun();
+        return dispatchSceneWalk(goal, true);
+    }
+
+    private static boolean dispatchSceneWalk(WorldPoint worldPoint, boolean finalDestination) {
+        if (worldPoint == null || (walkerClickMode() == WalkerClickMode.MINIMAP_ONLY && !finalDestination)) {
             return false;
         }
         if (Rs2Walker.isRouteCameraTurning()) {
@@ -1058,6 +1073,32 @@ final class Rs2WalkerMovement {
             return SceneClickPolicy.isSettled(before, latest[0][0], latest[0][1]);
         }, () -> { }, SCENE_WALK_CONFIRM_TIMEOUT_MS, SCENE_WALK_CONFIRM_POLL_MS);
         return latest[0];
+    }
+
+    static boolean isRouteObjectOnCanvas(TileObject object) {
+        if (object == null) {
+            return false;
+        }
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            Shape clickbox = object.getClickbox();
+            if (clickbox == null) {
+                return false;
+            }
+            Client client = Microbot.getClient();
+            Rectangle viewport = new Rectangle(client.getViewportXOffset(), client.getViewportYOffset(),
+                    client.getViewportWidth(), client.getViewportHeight());
+            if (!clickbox.intersects(viewport)) {
+                return false;
+            }
+            java.awt.geom.Area visible = new java.awt.geom.Area(clickbox);
+            visible.intersect(new java.awt.geom.Area(viewport));
+            for (Rectangle overlay : Rs2UiHelper.visibleSceneOverlayBounds()) {
+                if (overlay != null) {
+                    visible.subtract(new java.awt.geom.Area(overlay));
+                }
+            }
+            return !visible.isEmpty();
+        }).orElse(false);
     }
 
     static boolean isSceneCanvasClickable(WorldPoint worldPoint) {
@@ -1180,7 +1221,9 @@ final class Rs2WalkerMovement {
         boolean routeBacked = rawPath != null && !rawPath.isEmpty();
         int rawAnchorIndex = routeBacked ? rawAnchorIndexForPathPosition(rawPath, path, playerLoc) : -1;
         boolean clicked;
-        if (routeBacked) {
+        if (minimapModeUsesExactDestination(target, end)) {
+            clicked = walkCanvasDestination(target, end, playerLoc);
+        } else if (routeBacked) {
             clicked = clickRouteBackedShortWalk(rawPath, end, playerLoc,
                     directClickMaxDistance - 1, rawAnchorIndex);
         } else {
@@ -1218,7 +1261,9 @@ final class Rs2WalkerMovement {
 
         if (!moved) {
             WorldPoint retryPlayerLoc = Rs2Player.getWorldLocation();
-            if (routeBacked && retryPlayerLoc != null) {
+            if (minimapModeUsesExactDestination(target, end)) {
+                clicked = walkCanvasDestination(target, end, retryPlayerLoc);
+            } else if (routeBacked && retryPlayerLoc != null) {
                 int retryRawAnchorIndex = rawPathForwardAnchorIndex(rawPath, retryPlayerLoc, rawAnchorIndex);
                 clicked = clickRouteBackedShortWalk(rawPath, end, retryPlayerLoc,
                         directClickMaxDistance - 1, retryRawAnchorIndex);

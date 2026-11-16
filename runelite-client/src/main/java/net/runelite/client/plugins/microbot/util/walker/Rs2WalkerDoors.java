@@ -20,6 +20,7 @@ import net.runelite.client.plugins.devtools.MovementFlag;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.shortestpath.*;
+import net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.bank.enums.BankLocation;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
@@ -475,6 +476,10 @@ final class Rs2WalkerDoors {
      * walking nor a scan — so it needs its own number before anyone optimises against it.
      */
     static boolean interactDoorTimed(TileObject object, String action) {
+        if (walkerClickMode() == ShortestPathConfig.WalkerClickMode.MINIMAP_ONLY
+                && Boolean.TRUE.equals(VERIFIED_FIRST_ROUTE_DOOR.get()) && !isRouteObjectOnCanvas(object)) {
+            return false;
+        }
         long startedAt = System.currentTimeMillis();
         try {
             return Rs2WalkerSceneObjects.interact(object, action);

@@ -681,7 +681,14 @@ public class Rs2Walker {
      * wrong side of a wall/door for small interiors. When {@code dLast &lt; TIGHT_PATH_GOAL_GAP}, cap is {@code 1};
      * when {@code dLast == TIGHT_PATH_GOAL_GAP}, cap is {@code 2} (outdoor micro-walking relief at the gap radius).
      */
+    static boolean minimapModeUsesExactDestination(WorldPoint goal, WorldPoint pathEnd) {
+        return walkerClickMode() == WalkerClickMode.MINIMAP_ONLY && goal != null && goal.equals(pathEnd);
+    }
+
     static int tightFinishThreshold(WorldPoint goal, WorldPoint pathLastWalkable, int configuredChebyshev) {
+        if (minimapModeUsesExactDestination(goal, pathLastWalkable)) {
+            return 0;
+        }
         int cfg = Math.max(0, configuredChebyshev);
         if (goal == null || pathLastWalkable == null) {
             return cfg;
@@ -1369,7 +1376,9 @@ public class Rs2Walker {
                 && (reachableWithinDistance.isEmpty()
                 || hasReachableNeighbour(target, reachableWithinDistance));
 
-        if (reachableTileCheck || unwalkableTargetReached) {
+        if (playerLocWalk.equals(target)
+                || (reachableTileCheck && walkerClickMode() != WalkerClickMode.MINIMAP_ONLY)
+                || unwalkableTargetReached) {
             return WalkerState.ARRIVED;
         }
         if (!walkableCheck && distToTarget <= distance && !reachableWithinDistance.isEmpty()) {
@@ -1475,7 +1484,9 @@ public class Rs2Walker {
         boolean walkableCheck = localTarget != null && Rs2Tile.isWalkable(localTarget);
         boolean reachableTileCheck = distToTarget <= distance
                 && Rs2Tile.getReachableTilesFromTile(playerLoc, distance).containsKey(target);
-        if (reachableTileCheck || (!walkableCheck && distToTarget <= distance)) {
+        if (playerLoc.equals(target)
+                || (reachableTileCheck && walkerClickMode() != WalkerClickMode.MINIMAP_ONLY)
+                || (!walkableCheck && distToTarget <= distance)) {
             return WalkerState.ARRIVED;
         }
 
@@ -1510,6 +1521,12 @@ public class Rs2Walker {
         // target nor a planned-path point is clickable (e.g. the route needs a transport walkStep can't
         // cross), no click is issued and we hold on the line rather than wander off it — walkStep is not
         // built for transport routes; use the blocking walkTo/walkUntil for those.
+        if (minimapModeUsesExactDestination(target, path.get(path.size() - 1))
+                && !hasPendingExplicitTransportStepBeforeArrival(rawPath, target, 0)
+                && !hasPendingDoorLikeSceneObjectBeforeDirectClick(rawPath, path, playerLoc, normalMinimapReach())
+                && walkCanvasDestination(target, target, playerLoc)) {
+            return WalkerState.MOVING;
+        }
         int walkStepReach = normalMinimapReach();
         boolean allowDirectionalFallback = playerLoc.distanceTo(target) <= walkStepReach;
         clickMiniMapOrFallback(rawPath, target, playerLoc, walkStepReach - 1, allowDirectionalFallback, -1);
@@ -3111,6 +3128,12 @@ public class Rs2Walker {
                         final long clickedAt = System.currentTimeMillis();
                         sleepUntil(() -> {
                             if (isWalkCancelled(target)) return true;
+                            if (walkerClickMode() == WalkerClickMode.MINIMAP_ONLY) {
+                                WorldPoint now = Rs2Player.getWorldLocation();
+                                if (now != null && !now.equals(before)) {
+                                    return true;
+                                }
+                            }
                             long elapsed = System.currentTimeMillis() - clickedAt;
                             if (elapsed < 600) return false;
                             if (!Rs2Player.isMoving()) return true;
@@ -3257,7 +3280,9 @@ public class Rs2Walker {
                     if (finalPlayerLoc != null && Rs2Tile.isTileReachable(finalTile) && finalPlayerLoc.distanceTo(finalTile) >= finishTh) {
                         final WorldPoint canvasClickWp = finalTile;
                         boolean finalClick;
-                        if (rawPath != null && !rawPath.isEmpty()) {
+                        if (minimapModeUsesExactDestination(target, canvasClickWp)) {
+                            finalClick = walkCanvasDestination(target, canvasClickWp, finalPlayerLoc);
+                        } else if (rawPath != null && !rawPath.isEmpty()) {
                             int rawAnchorIndex = rawAnchorIndexForPathPosition(rawPath, path, finalPlayerLoc);
                             finalClick = clickRouteBackedShortWalk(rawPath, canvasClickWp, finalPlayerLoc,
                                     normalMinimapReach() - 1, rawAnchorIndex);
@@ -8414,8 +8439,8 @@ public class Rs2Walker {
             List<WorldPoint> rawPath, int smoothedIndex, int[] smoothedToRaw,
             WalkLoopSnapshot walkLoop, boolean clearedInterimTarget) {
         if (rawPath == null || rawPath.size() < 2 || !rangedTransportDispatchEnabled()
-                || !(walkLoop.moving || routeState.interimTargetWp != null
-                || currentWalkerPhase() == WalkerPhase.STARTUP || clearedInterimTarget)
+                || !(walkerClickMode() == WalkerClickMode.MINIMAP_ONLY || walkLoop.moving
+                || routeState.interimTargetWp != null || currentWalkerPhase() == WalkerPhase.STARTUP || clearedInterimTarget)
                 || walkLoop.interacting || walkLoop.animating
                 || isDoorInteractionSettling() || isTransportInteractionSettling()
                 || isRecoveryMovementInFlight()) {
@@ -8557,7 +8582,8 @@ public class Rs2Walker {
         }
 
         RouteSceneObjectSnapshot.Entry door = sceneDoorByEdge.get(firstEdge);
-        if (door == null) {
+        if (door == null || (walkerClickMode() == WalkerClickMode.MINIMAP_ONLY
+                && !isRouteObjectOnCanvas(door.object()))) {
             return FirstRouteInteractionResult.PENDING;
         }
         return handleVerifiedFirstRouteDoorAtRange(rawPath, firstEdge, doorTimeoutMs)

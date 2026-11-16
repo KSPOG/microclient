@@ -137,7 +137,7 @@ public interface ShortestPathConfig extends Config {
     @ConfigItem(
             keyName = "walkerClickMode",
             name = "Walker click mode",
-            description = "Choose where the walker clicks to move. Doors, transports and other interactions use their normal controls.",
+            description = "Minimap only uses the minimap en route and the game canvas for the final walkable tile. Route objects use their normal interactions.",
             position = -1,
             section = sectionSettings
     )
