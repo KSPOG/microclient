@@ -5409,7 +5409,7 @@ public class Rs2Walker {
 
     private static boolean isTransportInteractionSettling() {
         long handledAt = routeState.lastTransportHandledAtMs;
-        if (handledAt <= 0L) {
+        if (handledAt <= 0L || routeState.transportLandingObserved) {
             return false;
         }
         return transportSettlePending(System.currentTimeMillis() - handledAt,

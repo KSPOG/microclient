@@ -32,6 +32,7 @@ public final class WalkerRouteState {
      * leaves the window armed — see {@link #clearRecentTransportContext()}.
      */
     public volatile long lastTransportHandledAtMs = 0L;
+    public volatile boolean transportLandingObserved;
     /** Origin tile of the last handled transport. */
     public volatile WorldPoint lastTransportOriginLocation = null;
     /** Destination tile of the last handled transport. */
@@ -47,6 +48,7 @@ public final class WalkerRouteState {
      */
     public void clearRecentTransportContext() {
         lastTransportHandledAtMs = 0L;
+        transportLandingObserved = false;
         lastTransportOriginLocation = null;
         lastTransportDestinationLocation = null;
     }

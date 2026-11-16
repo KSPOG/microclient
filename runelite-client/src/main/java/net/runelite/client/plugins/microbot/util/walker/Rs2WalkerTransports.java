@@ -541,9 +541,18 @@ final class Rs2WalkerTransports {
                                 }
 
                                 // Wrap with observation so Leagues blocked-region chat can attribute this attempt.
+                                final WorldPoint beforeTravel = Rs2Player.getWorldLocation();
+                                final int terminalDestinationIndex = precomputedIndexOfDest;
                                 if (attemptObserved(transport, () -> Rs2Npc.interact(npc, npcAction))) {
-                                    Rs2Player.waitForWalking();
-                                    sleepUntil(Rs2Dialogue::isInDialogue, 600 * 2);
+                                    if (terminalTravelMode != Rs2TerminalTravelMode.DIRECT
+                                            || !npcAction.equalsIgnoreCase(transport.getAction())
+                                            || "Talk-to".equalsIgnoreCase(npcAction)) {
+                                        sleepUntil(() -> Rs2Dialogue.isInDialogue()
+                                                || observedTerminalLanding(transport, path, terminalDestinationIndex, beforeTravel), 1200);
+                                    }
+                                    if (observedTerminalLanding(transport, path, terminalDestinationIndex, beforeTravel)) {
+                                        return finishHandledTransport(transport, true);
+                                    }
 
                                     if (Objects.equals(transport.getName(), "Veos") && Objects.equals(transport.getAction(), "Talk-to")) {
                                         sleepUntil(() -> !Rs2Dialogue.hasContinue(), Rs2Dialogue::clickContinue, 5000, Rs2Random.between(600, 800));
@@ -560,7 +569,11 @@ final class Rs2WalkerTransports {
                                     }
 
                                     if (Rs2Dialogue.clickOption("I'm just going to Pirates' cove")) {
-                                        sleepTickJitter(2);
+                                        sleepUntil(() -> Rs2Dialogue.hasContinue()
+                                                || observedTerminalLanding(transport, path, terminalDestinationIndex, beforeTravel), 1200);
+                                        if (observedTerminalLanding(transport, path, terminalDestinationIndex, beforeTravel)) {
+                                            return finishHandledTransport(transport, true);
+                                        }
                                         Rs2Dialogue.clickContinue();
                                     }
                                     // Right-clicking the destination is always preferred and needs no
@@ -582,13 +595,12 @@ final class Rs2WalkerTransports {
                                         effectiveTravelMode = Rs2TerminalTravelMode.DIALOGUE_DESTINATION;
                                     }
                                     if (!selectTerminalTravelDialogueDestination(
-                                            transport, effectiveTravelMode)) {
+                                            transport, effectiveTravelMode, beforeTravel)) {
                                         break originLoop;
                                     }
-                                    final int terminalDestinationIndex = precomputedIndexOfDest;
                                     if (awaitTerminalTravelLanding(
-                                            transport, path, terminalDestinationIndex)) {
-                                        return finishHandledTransport(transport);
+                                            transport, path, terminalDestinationIndex, beforeTravel)) {
+                                        return finishHandledTransport(transport, true);
                                     }
                                 }
                             } else {
@@ -617,16 +629,17 @@ final class Rs2WalkerTransports {
                                     }
                                     prepareTransportObjectForInteraction(terminalObject);
                                     final TileObject selectedTerminalObject = terminalObject;
+                                    final WorldPoint beforeTravel = Rs2Player.getWorldLocation();
                                     if (attemptObserved(transport, () -> Rs2WalkerSceneObjects.interact(
                                         selectedTerminalObject, objectAction))) {
                                         if (!selectTerminalTravelDialogueDestination(
-                                                transport, terminalTravelMode)) {
+                                                transport, terminalTravelMode, beforeTravel)) {
                                             break originLoop;
                                         }
                                         final int terminalDestinationIndex = precomputedIndexOfDest;
                                         if (awaitTerminalTravelLanding(
-                                            transport, path, terminalDestinationIndex)) {
-                                            return finishHandledTransport(transport);
+                                            transport, path, terminalDestinationIndex, beforeTravel)) {
+                                            return finishHandledTransport(transport, true);
                                         }
                                     }
                                 } else {
@@ -986,16 +999,23 @@ final class Rs2WalkerTransports {
                                     interactionAction, transportAction, object.getWorldLocation(), object.getId());
                         }
                         prepareTransportObjectForInteraction(object);
+                        WorldPoint beforeInteraction = Rs2Player.getWorldLocation();
+                        boolean locationDriven = usesLocationDrivenObjectLanding(transport);
                         if (!handleObject(transport, object, interactionAction)) {
                             return false;
                         }
-                        sleepUntil(() -> !Rs2Player.isAnimating());
+                        if (!locationDriven) {
+                            sleepUntil(() -> !Rs2Player.isAnimating());
+                        }
                         WorldPoint destWait = transport.getDestination();
                         int maxInclusive = isAdjacentSamePlaneTransport(transport) ? 0 : OFFSET;
                         if (destWait == null) {
                             return false;
                         }
-                        boolean landedAfterObject = waitForPostHandleObjectLanding(transport, destWait, maxInclusive);
+                        boolean landedAfterObject = locationDriven
+                                ? sleepUntil(() -> hasObservedObjectLanding(beforeInteraction, Rs2Player.getWorldLocation(),
+                                        transport.getOrigin(), destWait, maxInclusive), POST_HANDLE_OBJECT_LANDING_WAIT_MS)
+                                : waitForPostHandleObjectLanding(transport, destWait, maxInclusive);
                         if (!landedAfterObject) {
                             WorldPoint afterInteraction = Rs2Player.getWorldLocation();
                             // Adjacent same-plane transports demand landing on the EXACT destination
@@ -1020,7 +1040,7 @@ final class Rs2WalkerTransports {
                         }
                         if (landedAfterObject) {
                             markShortSamePlaneTransportHandled(transport, object);
-                            return finishHandledTransport(transport);
+                            return finishHandledTransport(transport, locationDriven);
                         }
                         return false;
                     }
@@ -1106,6 +1126,24 @@ final class Rs2WalkerTransports {
             Rs2PathApi.unlearnBlockedEdge(edge[0], edge[1], "walk-scoped transport strike-out expired");
         }
         Rs2PathApi.clearWalkBlockedTeleports();
+    }
+
+    private static boolean usesLocationDrivenObjectLanding(Transport transport) {
+        WorldPoint origin = transport.getOrigin();
+        WorldPoint destination = transport.getDestination();
+        String action = transport.getAction() == null ? ""
+                : transport.getAction().toLowerCase(Locale.ROOT).replace('-', ' ');
+        return transport.getType() == TransportType.TELEPORTATION_PORTAL
+                || (origin != null && destination != null && origin.getPlane() != destination.getPlane())
+                || action.equals("climb up") || action.equals("climb down");
+    }
+
+    static boolean hasObservedObjectLanding(WorldPoint before, WorldPoint now, WorldPoint origin,
+                                             WorldPoint destination, int range) {
+        return before != null && now != null && destination != null && !now.equals(before)
+                && now.getPlane() == destination.getPlane() && now.distanceTo2D(destination) <= range
+                && (origin == null || now.getPlane() != origin.getPlane()
+                    || now.equals(destination) || now.distanceTo2D(origin) > 1);
     }
 
     private static boolean waitForPostHandleObjectLanding(Transport transport,
@@ -1309,7 +1347,7 @@ final class Rs2WalkerTransports {
         if (isGuidorGateTransport(transport)) {
             return handleGuidorGateSearch(transport);
         }
-        if (handleObjectExceptions(transport, tileObject)) return true;
+        if (handleObjectExceptions(transport, tileObject) || usesLocationDrivenObjectLanding(transport)) return true;
         WorldPoint tdObj = transport.getDestination();
         WorldPoint plObj = Rs2Player.getWorldLocation();
         if (tdObj == null || plObj == null) {
@@ -1330,8 +1368,6 @@ final class Rs2WalkerTransports {
                     sleepUntil(() -> Rs2Player.getPoseAnimation() == 2148, 5000);
                     sleepUntil(() -> Rs2Player.getPoseAnimation() != 2148, 10000);
                 }
-            } else if (transport.getType() == TransportType.TELEPORTATION_PORTAL) {
-                sleepTickJitter(2); // wait extra 2 game ticks before moving
             } else {
                 waitForSamePlaneTransportStart(transport, before);
                 Rs2Dialogue.clickOption("Yes please"); //shillo village cart
@@ -1359,49 +1395,10 @@ final class Rs2WalkerTransports {
                 }
             }
             return true;
-        } else {
-            WorldPoint plZ = Rs2Player.getWorldLocation();
-            if (plZ == null) {
-                return false;
-            }
-            int z = plZ.getPlane();
-            // Instrumentation: the FIRST plane-change transport of a walk consistently costs ~9.5s
-            // while the same kind mid-route costs ~2.2s (measured across two Falador castle runs).
-            // The waits below bound at 1800 + 5000 + jitter, and a failed start returns false and is
-            // retried, so two attempts would explain it — but that is inference. These timings say
-            // which of start-detection, plane-detection or retry actually burns the seconds.
-            long planeChangeStartedAt = System.currentTimeMillis();
-            boolean started = sleepUntil(() -> {
-                WorldPoint p = Rs2Player.getWorldLocation();
-                return p != null && (p.getPlane() != z || Rs2Player.isMoving() || Rs2Player.isAnimating());
-            }, 1800);
-            long startWaitMs = System.currentTimeMillis() - planeChangeStartedAt;
-            if (!started) {
-                WebWalkLog.spInfo("transport_plane_change | no_start startWaitMs={} obj={} action={} — returning for retry",
-                        startWaitMs, tileObject.getId(), transport.getAction());
-                return false;
-            }
-            WorldPoint plAfterStart = Rs2Player.getWorldLocation();
-            boolean planeChanged = plAfterStart != null && plAfterStart.getPlane() != z
-                    || sleepUntil(() -> {
-                        WorldPoint p = Rs2Player.getWorldLocation();
-                        return p != null && p.getPlane() != z;
-                    }, 5000);
-            long planeWaitMs = System.currentTimeMillis() - planeChangeStartedAt - startWaitMs;
-            if (planeChanged) {
-                // gaussRand is an unbounded Box-Muller draw, so mean 300 / dev 120 goes negative past
-                // ~2.5 sigma (about one call in 160) and Thread.sleep throws IllegalArgumentException,
-                // killing the whole walk. Seen live: "timeout value is negative" here aborted a
-                // Falador castle run into ShortestPathScript auto-retry 1/3. Clamping only removes the
-                // impossible tail — the jitter this sleep exists to provide is untouched.
-                sleep(Math.max(MIN_PLANE_CHANGE_SETTLE_MS, (int) Rs2Random.gaussRand(300.0, 120.0)));
-            }
-            WebWalkLog.spInfo("transport_plane_change | changed={} startWaitMs={} planeWaitMs={} totalMs={} obj={}",
-                    planeChanged, startWaitMs, planeWaitMs,
-                    System.currentTimeMillis() - planeChangeStartedAt, tileObject.getId());
-            return planeChanged;
         }
+        return false;
     }
+
 
     /**
      * Executes the normal transport dispatcher while allowing a route-ordered object click to let
@@ -1444,6 +1441,11 @@ final class Rs2WalkerTransports {
     }
 
     private static boolean finishHandledTransport(Transport transport) {
+        return finishHandledTransport(transport, false);
+    }
+
+    private static boolean finishHandledTransport(Transport transport, boolean observedLanding) {
+        routeState.transportLandingObserved = observedLanding;
         long handoffStartedAt = System.currentTimeMillis();
         routeState.lastTransportHandledAtMs = handoffStartedAt;
         routeState.lastTransportOriginLocation = transport != null ? transport.getOrigin() : null;
@@ -1606,7 +1608,7 @@ final class Rs2WalkerTransports {
     }
 
     private static boolean selectTerminalTravelDialogueDestination(
-            Transport transport, Rs2TerminalTravelMode mode) {
+            Transport transport, Rs2TerminalTravelMode mode, WorldPoint beforeTravel) {
         if (mode == Rs2TerminalTravelMode.DIRECT) {
             return true;
         }
@@ -1625,7 +1627,7 @@ final class Rs2WalkerTransports {
         // to landing, so a 5s wait always lost the race and warned right at touchdown (18:00 and
         // 18:28 runs). Both releases fire early, so a long budget costs nothing when things work —
         // the timeout is reached only when neither dialogue nor landing ever happened.
-        final WorldPoint dialogueWaitStart = Rs2Player.getWorldLocation();
+        final WorldPoint dialogueWaitStart = beforeTravel;
         final WorldPoint terminalDest = transport.getDestination();
         if (!sleepUntil(() -> Rs2Dialogue.hasSelectAnOption()
                 || hasLandedAtTerminalDestination(Rs2Player.getWorldLocation(), dialogueWaitStart, terminalDest),
@@ -1738,12 +1740,18 @@ final class Rs2WalkerTransports {
                 Collections.singletonList(transport.getAction())).isPresent();
     }
 
+    private static boolean observedTerminalLanding(Transport transport, List<WorldPoint> path,
+                                                    int destinationIndex, WorldPoint beforeTravel) {
+        WorldPoint now = Rs2Player.getWorldLocation();
+        return beforeTravel != null && now != null && !beforeTravel.equals(now)
+                && hasReachedTerminalTravelLanding(transport, path, destinationIndex, now);
+    }
+
     private static boolean awaitTerminalTravelLanding(Transport transport,
                                                       List<WorldPoint> path,
-                                                      int destinationIndex) {
+                                                      int destinationIndex, WorldPoint beforeTravel) {
         boolean landed = sleepUntil(
-                () -> hasReachedTerminalTravelLanding(
-                        transport, path, destinationIndex, Rs2Player.getWorldLocation()),
+                () -> observedTerminalLanding(transport, path, destinationIndex, beforeTravel),
                 SHIP_NPC_BOAT_LANDING_WAIT_MS);
         if (!landed) {
             WebWalkLog.spWarn(
@@ -1983,7 +1991,6 @@ final class Rs2WalkerTransports {
                 } else if (tileObject.getId() == openTrapdoorId) {
                     Rs2WalkerSceneObjects.interact(tileObject, transport.getAction());
                 }
-                sleepUntil(() -> !Rs2Player.isAnimating());
                 boolean trapdoorLanded = sleepUntilTrue(
                         () -> isPlayerWithinChebyshevOf(transport.getDestination(), OFFSET),
                         TRANSPORT_LANDING_WAIT_POLL_MS, TRANSPORT_LANDING_WAIT_TIMEOUT_MS);
