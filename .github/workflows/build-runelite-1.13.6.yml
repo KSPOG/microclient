@@ -4,6 +4,10 @@ on:
     branches: [update/runelite-1.13.6]
   workflow_dispatch:
 
+concurrency:
+  group: microclient-runelite-1.13.6
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -11,8 +15,19 @@ jobs:
   build:
     permissions:
       contents: write
+      actions: write
     runs-on: ubuntu-24.04
     steps:
+      - name: Stop the superseded build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          route="repos/$GITHUB_REPOSITORY/actions/runs/43962248159"
+          if [ "$(gh api "$route" --jq .status)" != completed ]; then
+            if ! gh api -X POST "$route/cancel"; then
+              test "$(gh api "$route" --jq .status)" = completed
+            fi
+          fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -84,6 +99,13 @@ jobs:
           grep -Fx 'project.build.version=1.13.6' gradle.properties
           grep -Fx 'runelite.injected-client.version=1.13.6' gradle.properties
           git add -A
+      - name: Regenerate injected-client menu metadata
+        shell: bash
+        run: |
+          bash ./gradlew :client:seedMenuActionInfo
+          seed=runelite-client/src/main/resources/net/runelite/client/plugins/microbot/util/reflection/menu-action-info.properties
+          sed -i '2{/^#/d;}' "$seed"
+          git add -- "$seed"
           git diff --cached --binary HEAD > "$RUNNER_TEMP/microclient-runelite-1.13.6.patch"
       - name: Record exact source commit
         id: source
@@ -127,8 +149,14 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$BUILT_SHA"
           gh auth setup-git
-          git push origin "$BUILT_SHA:refs/heads/release/runelite-1.13.6"
-          gh release create microbot-2.6.22-runelite-1.13.6 \
+          branch=release/runelite-1.13.6
+          tag=microbot-2.6.22-runelite-1.13.6
+          if git ls-remote --exit-code --refs origin "refs/heads/$branch" >/dev/null; then
+            branch="$branch-r2"
+            tag="$tag-r2"
+          fi
+          git push origin "$BUILT_SHA:refs/heads/$branch"
+          gh release create "$tag" \
             "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6.jar" \
             --repo "$GITHUB_REPOSITORY" --target "$BUILT_SHA" \
             --title "Microbot 2.6.22 · RuneLite 1.13.6" \
