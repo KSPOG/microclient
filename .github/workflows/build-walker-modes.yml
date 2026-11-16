@@ -1,0 +1,51 @@
+name: Build Microbot with walker click modes
+
+on:
+  push:
+    branches: [release/runelite-1.13.6-walker-modes]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - name: Compile and verify the runnable JAR
+        shell: bash
+        run: |
+          bash ./gradlew :client:shadowJar -Pmicrobot.commit.sha="$GITHUB_SHA"
+          mapfile -t jars < <(find runelite-client/build/libs -maxdepth 1 -name '*-shaded.jar')
+          test "${#jars[@]}" -eq 1
+          unzip -tq "${jars[0]}"
+          unzip -p "${jars[0]}" net/runelite/client/runelite.properties > "$RUNNER_TEMP/runelite-build.properties"
+          grep -Fx 'runelite.version=1.13.6' "$RUNNER_TEMP/runelite-build.properties"
+          grep -Fx "microbot.commit=$GITHUB_SHA" "$RUNNER_TEMP/runelite-build.properties"
+          timeout 30s java -jar "${jars[0]}" --help
+          cp "${jars[0]}" "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6-walker-modes.jar"
+      - name: Run walker unit tests
+        run: bash ./gradlew :client:runUnitTests --tests '*Rs2WalkerUnitTest'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microbot-2.6.22-runelite-1.13.6-walker-modes
+          if-no-files-found: error
+          path: ${{ runner.temp }}/microbot-2.6.22-runelite-1.13.6-walker-modes.jar
+      - name: Publish the verified client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create microbot-2.6.22-runelite-1.13.6-walker-modes \
+            "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6-walker-modes.jar" \
+            --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" --latest=false \
+            --title "Microbot 2.6.22 · RuneLite 1.13.6 · Walker click modes" \
+            --notes "Web Walker → Settings → Walker click mode: Both, Minimap only, or Canvas only."

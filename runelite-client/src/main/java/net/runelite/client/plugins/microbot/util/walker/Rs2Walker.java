@@ -19,6 +19,7 @@ import net.runelite.client.plugins.devtools.MovementFlag;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.shortestpath.*;
+import net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig.WalkerClickMode;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.CollisionMap;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.Pathfinder;
 import net.runelite.client.plugins.microbot.shortestpath.pathfinder.PathfinderConfig;
@@ -111,7 +112,7 @@ import static net.runelite.client.plugins.microbot.util.Global.*;
 @Slf4j
 public class Rs2Walker {
     @Setter
-    public static ShortestPathConfig config;
+    public static volatile ShortestPathConfig config;
     // stuck/movement tracking state migrated to WalkerRouteState (see routeState)
     static volatile WorldPoint currentTarget;
     static int nextWalkingDistance = 10;
@@ -2892,7 +2893,9 @@ public class Rs2Walker {
                     lastAttemptedMinimapClickOk = clicked;
                     lastAttemptedMinimapClickAtMs = nowMs;
                     if (clicked) {
-                        markFirstMovementClick("first_minimap_click", target, posBefore,
+                        String clickPhase = clickMode() == WalkerClickMode.CANVAS_ONLY
+                                ? "first_canvas_click" : "first_minimap_click";
+                        markFirstMovementClick(clickPhase, target, posBefore,
                                 "to=" + compactWorldPoint(clickedTarget));
                         hintRouteProgressIndex(path,
                                 Math.min(targetIdx, i + INTERIM_CLOSE_TILES),
@@ -3522,7 +3525,18 @@ public class Rs2Walker {
         }
     }
 
+    private static WalkerClickMode clickMode() {
+        ShortestPathConfig currentConfig = config;
+        return currentConfig == null ? WalkerClickMode.BOTH : currentConfig.walkerClickMode();
+    }
+
     public static boolean walkMiniMap(WorldPoint worldPoint, double zoomDistance) {
+        if (worldPoint == null) {
+            return false;
+        }
+        if (clickMode() == WalkerClickMode.CANVAS_ONLY) {
+            return walkFastCanvasOnScreenOnly(worldPoint, true);
+        }
         if (Microbot.getClient().getMinimapZoom() != zoomDistance)
             Microbot.getClient().setMinimapZoom(zoomDistance);
 
@@ -3540,9 +3554,12 @@ public class Rs2Walker {
         return walkMiniMap(worldPoint, 5);
     }
 
-    private static boolean isMiniMapClickable(WorldPoint worldPoint, double zoomDistance) {
+    private static boolean isRouteClickVisible(WorldPoint worldPoint, double zoomDistance) {
         if (worldPoint == null) {
             return false;
+        }
+        if (clickMode() == WalkerClickMode.CANVAS_ONLY) {
+            return visibleCanvasWalkPoint(localPointForWorld(worldPoint)) != null;
         }
         if (Microbot.getClient().getMinimapZoom() != zoomDistance) {
             Microbot.getClient().setMinimapZoom(zoomDistance);
@@ -3586,6 +3603,22 @@ public class Rs2Walker {
         if (allowDirectionalFallback && walkMiniMapToward(target, playerLoc, maxEuclidean)) {
             return target;
         }
+        if (clickMode() == WalkerClickMode.CANVAS_ONLY
+                && !Microbot.getClient().isClientThread() && !Rs2Player.isMoving()) {
+            WorldPoint cameraTarget = findFurthestRawPathPointMatchingGated(rawPath, playerLoc, maxEuclidean,
+                    rawAnchorIndex, tile -> localPointForWorld(tile) != null && !tile.equals(playerLoc));
+            if (cameraTarget == null && euclideanSq(playerLoc, target) <= maxEuclidean * maxEuclidean
+                    && Rs2Tile.isTileReachable(target)) {
+                cameraTarget = target;
+            }
+            LocalPoint localTarget = localPointForWorld(cameraTarget);
+            if (localTarget != null) {
+                Rs2Camera.turnTo(localTarget);
+                if (walkFastCanvasOnScreenOnly(cameraTarget, true)) {
+                    return cameraTarget;
+                }
+            }
+        }
         return null;
     }
 
@@ -3600,7 +3633,7 @@ public class Rs2Walker {
             return null;
         }
         if (walkMiniMap(fallback)) {
-            log.info("[Walker] Minimap click target {} was outside clip; used route fallback {}", target, fallback);
+            log.info("[Walker] Click target {} was outside the visible area; used route fallback {}", target, fallback);
             return fallback;
         }
         return null;
@@ -3881,7 +3914,7 @@ public class Rs2Walker {
         return findFurthestRawPathPointMatchingGated(rawPath, playerLoc, maxEuclidean, rawAnchorIndex,
                 candidate -> !candidate.equals(playerLoc)
                         && isKnownWalkableOrUnloaded(candidate)
-                        && isMiniMapClickable(candidate, 5));
+                        && isRouteClickVisible(candidate, 5));
     }
 
     // rawPathStepDistance (pure) moved to geometry/WalkerPathGeometry (P1) alongside its only caller,
@@ -4091,6 +4124,19 @@ public class Rs2Walker {
      * @param localPoint A two-dimensional point in the local coordinate space.
      */
     public static void walkFastLocal(LocalPoint localPoint) {
+        if (localPoint == null) {
+            return;
+        }
+
+        WalkerClickMode mode = clickMode();
+        if (mode == WalkerClickMode.MINIMAP_ONLY) {
+            walkMiniMap(WorldPoint.fromLocal(Microbot.getClient(), localPoint));
+            return;
+        }
+        if (mode == WalkerClickMode.CANVAS_ONLY && visibleCanvasWalkPoint(localPoint) == null) {
+            return;
+        }
+
         Point canv = Perspective.localToCanvas(Microbot.getClient(), localPoint, Microbot.getClient().getTopLevelWorldView().getPlane());
         int canvasX = canv != null ? canv.getX() : -1;
         int canvasY = canv != null ? canv.getY() : -1;
@@ -4112,21 +4158,37 @@ public class Rs2Walker {
         return walkFastCanvas(worldPoint, true);
     }
 
-    private static boolean walkFastCanvasOnScreenOnly(WorldPoint worldPoint, boolean toggleRun) {
-        LocalPoint localPoint = localPointForWorld(worldPoint);
+    private static Point visibleCanvasWalkPoint(LocalPoint localPoint) {
         if (localPoint == null || !Rs2Camera.isTileOnScreen(localPoint)) {
-            return false;
+            return null;
         }
-        Point canvasPoint = Perspective.localToCanvas(
-                Microbot.getClient(),
-                localPoint,
-                Microbot.getClient().getTopLevelWorldView().getPlane());
-        int canvasX = canvasPoint != null ? canvasPoint.getX() : -1;
-        int canvasY = canvasPoint != null ? canvasPoint.getY() : -1;
-        if (canvasX < 0 || canvasY < 0) {
+
+        Client client = Microbot.getClient();
+        Point point = Perspective.localToCanvas(client, localPoint, client.getTopLevelWorldView().getPlane());
+        if (point == null || point.getX() < 0 || point.getY() < 0) {
+            return null;
+        }
+        if (clickMode() != WalkerClickMode.CANVAS_ONLY) {
+            return point;
+        }
+
+        Rectangle viewport = new Rectangle(client.getViewportXOffset(), client.getViewportYOffset(),
+                client.getViewportWidth(), client.getViewportHeight());
+        return viewport.contains(point.getX(), point.getY()) ? point : null;
+    }
+
+    private static boolean walkFastCanvasOnScreenOnly(WorldPoint worldPoint, boolean toggleRun) {
+        if (clickMode() == WalkerClickMode.MINIMAP_ONLY) {
             return false;
         }
 
+        Point canvasPoint = visibleCanvasWalkPoint(localPointForWorld(worldPoint));
+        if (canvasPoint == null) {
+            return false;
+        }
+
+        int canvasX = canvasPoint.getX();
+        int canvasY = canvasPoint.getY();
         Rs2Player.toggleRunEnergy(toggleRun);
         NewMenuEntry entry = new NewMenuEntry()
                 .param0(canvasX)
@@ -4142,7 +4204,7 @@ public class Rs2Walker {
     }
 
     private static LocalPoint localPointForWorld(WorldPoint worldPoint) {
-        if (worldPoint == null) {
+        if (worldPoint == null || worldPoint.getPlane() != Microbot.getClient().getTopLevelWorldView().getPlane()) {
             return null;
         }
         LocalPoint localPoint = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), worldPoint);
@@ -4157,6 +4219,16 @@ public class Rs2Walker {
             log.debug("[Walker] walkFastCanvas rejected: null worldPoint");
             return false;
         }
+
+        WalkerClickMode mode = clickMode();
+        if (mode == WalkerClickMode.CANVAS_ONLY) {
+            return walkFastCanvasOnScreenOnly(worldPoint, toggleRun);
+        }
+        if (mode == WalkerClickMode.MINIMAP_ONLY) {
+            Rs2Player.toggleRunEnergy(toggleRun);
+            return walkMiniMap(worldPoint) || walkMiniMapToward(worldPoint, Rs2Player.getWorldLocation(), 13);
+        }
+
         Rs2Player.toggleRunEnergy(toggleRun);
         Point canv;
         LocalPoint localPoint = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), worldPoint);
@@ -4206,6 +4278,11 @@ public class Rs2Walker {
     }
 
     public static WorldPoint walkCanvas(WorldPoint worldPoint) {
+        WalkerClickMode mode = clickMode();
+        if (mode != WalkerClickMode.BOTH) {
+            return walkMiniMap(worldPoint) ? worldPoint : null;
+        }
+
         LocalPoint localPoint = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), worldPoint);
         if (localPoint == null) {
             log.error("Tried to walkCanvas but localpoint returned null");
@@ -4894,6 +4971,10 @@ public class Rs2Walker {
                                                      WorldPoint playerLoc,
                                                      int maxEuclidean,
                                                      int rawAnchorIndex) {
+        if (clickMode() == WalkerClickMode.CANVAS_ONLY) {
+            return clickMiniMapOrFallback(rawPath, end, playerLoc, maxEuclidean, false, rawAnchorIndex) != null;
+        }
+
         boolean directTargetInRange = shouldAttemptDirectMinimapTarget(end, playerLoc, maxEuclidean);
         if (directTargetInRange && walkMiniMap(end)) {
             return true;
@@ -5824,13 +5905,13 @@ public class Rs2Walker {
                 playerLoc,
                 maxEuclidean,
                 reachable,
-                Rs2Walker::isMiniMapRecoveryClickable);
+                Rs2Walker::isRecoveryClickVisible);
     }
 
     // findForwardRecoveryIndex extracted to recovery/RouteRecovery (P1 walker decomposition)
 
-    private static boolean isMiniMapRecoveryClickable(WorldPoint worldPoint) {
-        return isMiniMapClickable(worldPoint, 5);
+    private static boolean isRecoveryClickVisible(WorldPoint worldPoint) {
+        return isRouteClickVisible(worldPoint, 5);
     }
 
     // interpolateClickableTarget extracted to recovery/RouteRecovery (P1)

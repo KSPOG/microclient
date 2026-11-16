@@ -121,6 +121,34 @@ public interface ShortestPathConfig extends Config {
     String sectionSettings = "sectionSettings";
 
     @ConfigItem(
+            keyName = "walkerClickMode",
+            name = "Walker click mode",
+            description = "Choose where the walker clicks to move. Doors, transports and other interactions use their normal controls.",
+            position = -1,
+            section = sectionSettings
+    )
+    default WalkerClickMode walkerClickMode() {
+        return WalkerClickMode.BOTH;
+    }
+
+    enum WalkerClickMode {
+        BOTH("Both"),
+        MINIMAP_ONLY("Minimap only"),
+        CANVAS_ONLY("Canvas only");
+
+        private final String label;
+
+        WalkerClickMode(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    @ConfigItem(
             keyName = "avoidWilderness",
             name = "Avoid wilderness",
             description = "Whether the wilderness should be avoided if possible<br>" +
