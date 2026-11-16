@@ -15,9 +15,12 @@ jobs:
       - name: Merge pinned upstream and list overlaps
         shell: bash
         run: |
-          git fetch --no-tags --depth=400 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16
-          git merge-base HEAD FETCH_HEAD
-          git -c user.name='Microclient integration' -c user.email='actions@users.noreply.github.com' \
-            merge --no-commit --no-ff FETCH_HEAD || true
+          git fetch --no-tags --depth=1 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16 055cb06ea04d6227569b05d669b96db922e2d522
+          git config user.name 'Microclient integration'
+          git config user.email 'actions@users.noreply.github.com'
+          ours=$(git commit-tree "4cdd7ab5fc95733c01b6a5866416c2f8105764ca^{tree}" -p 055cb06ea04d6227569b05d669b96db922e2d522 -m 'Fork snapshot')
+          theirs=$(git commit-tree "e3c0844dcd7d0e1214b7b24d111c5f3672f29c16^{tree}" -p 055cb06ea04d6227569b05d669b96db922e2d522 -m 'Upstream snapshot')
+          git switch --detach "$ours"
+          git merge --no-commit --no-ff "$theirs" || true
           git diff --name-only --diff-filter=U
           git diff --stat --cached | tail -n 4
