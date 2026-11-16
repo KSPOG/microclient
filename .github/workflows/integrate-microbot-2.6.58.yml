@@ -3,16 +3,24 @@ on:
   push:
     branches: [update/microbot-2.6.58-walker-modes]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  merge:
+  build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 400
           persist-credentials: false
-      - name: Merge pinned upstream and list overlaps
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - name: Integrate pinned release and walker modes
+        id: source
         shell: bash
         run: |
           git fetch --no-tags --depth=1 https://github.com/chsami/Microbot.git e3c0844dcd7d0e1214b7b24d111c5f3672f29c16 055cb06ea04d6227569b05d669b96db922e2d522
@@ -22,5 +30,74 @@ jobs:
           theirs=$(git commit-tree "e3c0844dcd7d0e1214b7b24d111c5f3672f29c16^{tree}" -p 055cb06ea04d6227569b05d669b96db922e2d522 -m 'Upstream snapshot')
           git switch --detach "$ours"
           git merge --no-commit --no-ff "$theirs" || true
-          git diff --name-only --diff-filter=U
-          git diff --stat --cached | tail -n 4
+          git diff --name-only -z --diff-filter=U > "$RUNNER_TEMP/conflicts"
+          while IFS= read -r -d '' file; do
+            if git cat-file -e "${theirs}:$file" 2>/dev/null; then
+              git checkout --theirs -- "$file"
+              git add -- "$file"
+            else
+              git rm -- "$file"
+            fi
+          done < "$RUNNER_TEMP/conflicts"
+          test -z "$(git ls-files -u)"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          edits = json.loads("{\"runelite-client/src/main/java/net/runelite/client/plugins/microbot/shortestpath/ShortestPathConfig.java\":[[\"    String sectionSettings = \\\"sectionSettings\\\";\",\"    String sectionSettings = \\\"sectionSettings\\\";\\n\\n    @ConfigItem(\\n            keyName = \\\"walkerClickMode\\\",\\n            name = \\\"Walker click mode\\\",\\n            description = \\\"Choose where the walker clicks to move. Doors, transports and other interactions use their normal controls.\\\",\\n            position = -1,\\n            section = sectionSettings\\n    )\\n    default WalkerClickMode walkerClickMode() {\\n        return WalkerClickMode.BOTH;\\n    }\\n\\n    enum WalkerClickMode {\\n        BOTH(\\\"Both\\\"),\\n        MINIMAP_ONLY(\\\"Minimap only\\\"),\\n        CANVAS_ONLY(\\\"Canvas only\\\");\\n\\n        private final String label;\\n\\n        WalkerClickMode(String label) {\\n            this.label = label;\\n        }\\n\\n        @Override\\n        public String toString() {\\n            return label;\\n        }\\n    }\"]],\"runelite-client/src/main/java/net/runelite/client/plugins/microbot/util/walker/Rs2Walker.java\":[[\"import net.runelite.client.plugins.microbot.shortestpath.*;\",\"import net.runelite.client.plugins.microbot.shortestpath.*;\\nimport net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig.WalkerClickMode;\"],[\"public static ShortestPathConfig config;\",\"public static volatile ShortestPathConfig config;\"],[\"    public static boolean walkMiniMap(WorldPoint worldPoint, double zoomDistance) {\",\"    public static boolean walkMiniMap(WorldPoint worldPoint, double zoomDistance) {\\n        if (worldPoint == null || walkerClickMode() == WalkerClickMode.CANVAS_ONLY) {\\n            return walkMiniMap(worldPoint);\\n        }\"],[\"    public static boolean walkMiniMap(WorldPoint worldPoint) {\",\"    public static boolean walkMiniMap(WorldPoint worldPoint) {\\n        if (worldPoint == null) {\\n            return false;\\n        }\\n        if (walkerClickMode() == WalkerClickMode.CANVAS_ONLY) {\\n            return walkFastCanvasOnScreenOnly(worldPoint, true);\\n        }\"],[\"    public static void walkFastLocal(LocalPoint localPoint) {\",\"    public static void walkFastLocal(LocalPoint localPoint) {\\n        if (localPoint == null) {\\n            return;\\n        }\\n        WalkerClickMode mode = walkerClickMode();\\n        if (mode != WalkerClickMode.BOTH) {\\n            WorldPoint worldPoint = WorldPoint.fromLocal(Microbot.getClient(), localPoint);\\n            if (mode == WalkerClickMode.MINIMAP_ONLY) {\\n                walkMiniMap(worldPoint);\\n            } else {\\n                dispatchSceneWalk(worldPoint);\\n            }\\n            return;\\n        }\"],[\"    private static boolean dispatchCanvasWalk(WorldPoint worldPoint) {\",\"    static WalkerClickMode walkerClickMode() {\\n        ShortestPathConfig currentConfig = config;\\n        WalkerClickMode mode = currentConfig == null ? null : currentConfig.walkerClickMode();\\n        return mode == null ? WalkerClickMode.BOTH : mode;\\n    }\\n\\n    private static boolean dispatchCanvasWalk(WorldPoint worldPoint) {\"],[\"            log.debug(\\\"[Walker] walkFastCanvas rejected: null worldPoint\\\");\\n            return false;\\n        }\\n        LocalPoint localPoint\",\"            log.debug(\\\"[Walker] walkFastCanvas rejected: null worldPoint\\\");\\n            return false;\\n        }\\n\\n        WalkerClickMode mode = walkerClickMode();\\n        if (mode == WalkerClickMode.CANVAS_ONLY) {\\n            return !Rs2WalkerMovement.SCENE_CLICKS.isSuppressed(System.currentTimeMillis())\\n                    && Rs2WalkerMovement.dispatchSceneWalk(worldPoint);\\n        }\\n        if (mode == WalkerClickMode.MINIMAP_ONLY) {\\n            return walkMiniMap(worldPoint) || walkMiniMapToward(worldPoint, Rs2Player.getWorldLocation(), 13);\\n        }\\n\\n        LocalPoint localPoint\"],[\"    public static WorldPoint walkCanvas(WorldPoint worldPoint) {\",\"    public static WorldPoint walkCanvas(WorldPoint worldPoint) {\\n        WalkerClickMode mode = walkerClickMode();\\n        if (mode == WalkerClickMode.MINIMAP_ONLY) {\\n            return walkMiniMap(worldPoint) ? worldPoint : null;\\n        }\\n        if (mode == WalkerClickMode.CANVAS_ONLY) {\\n            return dispatchSceneWalk(worldPoint) ? worldPoint : null;\\n        }\"]],\"runelite-client/src/main/java/net/runelite/client/plugins/microbot/util/walker/Rs2WalkerMovement.java\":[[\"import net.runelite.client.plugins.microbot.Microbot;\",\"import net.runelite.client.plugins.microbot.Microbot;\\nimport net.runelite.client.plugins.microbot.shortestpath.ShortestPathConfig.WalkerClickMode;\"],[\"        Point point = Rs2MiniMap.worldToMinimap(worldPoint);\\n        return point != null\",\"        if (walkerClickMode() == WalkerClickMode.CANVAS_ONLY) {\\n            return isSceneCanvasClickable(worldPoint);\\n        }\\n        Point point = Rs2MiniMap.worldToMinimap(worldPoint);\\n        return point != null\"],[\"        if (!Objects.equals(routeClickSessionTarget, Rs2Walker.getCurrentTarget())) {\",\"        WalkerClickMode mode = walkerClickMode();\\n        if (mode == WalkerClickMode.CANVAS_ONLY) {\\n            WorldPoint sceneTarget = walkRawPathSceneTargetToward(rawPath, target, playerLoc, maxEuclidean, rawAnchorIndex);\\n            if (sceneTarget != null) {\\n                return sceneTarget;\\n            }\\n            if (walkFastCanvasOnScreenOnly(target, true)) {\\n                return target;\\n            }\\n            alignCameraTowardWalkTarget(target);\\n            return null;\\n        }\\n        if (mode == WalkerClickMode.MINIMAP_ONLY) {\\n            if (walkMiniMap(target)) {\\n                return target;\\n            }\\n            WorldPoint mapTarget = walkRawPathMiniMapTargetToward(rawPath, target, playerLoc, maxEuclidean, rawAnchorIndex);\\n            if (mapTarget != null) {\\n                return mapTarget;\\n            }\\n            return allowDirectionalFallback && walkMiniMapToward(target, playerLoc, maxEuclidean) ? target : null;\\n        }\\n        if (!Objects.equals(routeClickSessionTarget, Rs2Walker.getCurrentTarget())) {\"],[\"        if (worldPoint == null || SCENE_CLICKS.isSuppressed(System.currentTimeMillis())) {\",\"        if (worldPoint == null || walkerClickMode() == WalkerClickMode.MINIMAP_ONLY\\n                || SCENE_CLICKS.isSuppressed(System.currentTimeMillis())) {\"],[\"    static boolean dispatchSceneWalk(WorldPoint worldPoint) {\\n        if (Rs2Walker.isRouteCameraTurning()) {\",\"    static boolean dispatchSceneWalk(WorldPoint worldPoint) {\\n        if (worldPoint == null || walkerClickMode() == WalkerClickMode.MINIMAP_ONLY) {\\n            return false;\\n        }\\n        if (Rs2Walker.isRouteCameraTurning()) {\"],[\"            log.info(\\\"[Walker] Scene clicks failed repeatedly; using minimap for {}ms\\\", SceneClickPolicy.SUPPRESSION_MS);\",\"            log.info(\\\"[Walker] Scene clicks failed repeatedly; temporarily pausing scene clicks for {}ms\\\",\\n                    SceneClickPolicy.SUPPRESSION_MS);\"],[\"        boolean directTargetInRange = shouldAttemptDirectMinimapTarget(end, playerLoc, maxEuclidean);\",\"        if (walkerClickMode() == WalkerClickMode.CANVAS_ONLY) {\\n            return clickMiniMapOrFallback(rawPath, end, playerLoc, maxEuclidean, false, rawAnchorIndex) != null;\\n        }\\n        boolean directTargetInRange = shouldAttemptDirectMinimapTarget(end, playerLoc, maxEuclidean);\"]]}")
+          for name, replacements in edits.items():
+              path = Path(name)
+              source = path.read_text()
+              for before, after in replacements:
+                  if source.count(before) != 1:
+                      raise RuntimeError(f"{path}: expected one {before!r}")
+                  source = source.replace(before, after)
+              path.write_text(source)
+          PY
+          grep -Fx 'microbot.version=2.6.58' gradle.properties
+          grep -Fx 'project.build.version=1.13.6' gradle.properties
+          grep -Fx 'runelite.injected-client.version=1.13.6' gradle.properties
+          git add -A
+          tree=$(git write-tree)
+          build_date=$(git show -s --format=%cI "$GITHUB_SHA")
+          export GIT_AUTHOR_DATE="$build_date" GIT_COMMITTER_DATE="$build_date"
+          source_sha=$(git commit-tree "$tree" -p 4cdd7ab5fc95733c01b6a5866416c2f8105764ca \
+            -m 'Update to Microbot 2.6.58 and carry forward Web Walker click modes' \
+            -m 'Upstream chsami/Microbot commit e3c0844dcd7d0e1214b7b24d111c5f3672f29c16')
+          git reset --hard "$source_sha"
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Compile and verify the JAR
+        env:
+          BUILT_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          bash ./gradlew :client:shadowJar -Pmicrobot.commit.sha="$BUILT_SHA"
+          mapfile -t jars < <(find runelite-client/build/libs -maxdepth 1 -name '*-shaded.jar')
+          test "${#jars[@]}" -eq 1
+          unzip -tq "${jars[0]}"
+          unzip -p "${jars[0]}" net/runelite/client/runelite.properties > "$RUNNER_TEMP/build.properties"
+          grep -Fx 'runelite.version=1.13.6' "$RUNNER_TEMP/build.properties"
+          grep -Fx 'microbot.version=2.6.58' "$RUNNER_TEMP/build.properties"
+          grep -Fx "microbot.commit=$BUILT_SHA" "$RUNNER_TEMP/build.properties"
+          timeout 30s java -jar "${jars[0]}" --help
+          cp "${jars[0]}" "$RUNNER_TEMP/microbot-2.6.58-runelite-1.13.6-walker-modes.jar"
+      - name: Verify walker unit tests
+        run: bash ./gradlew :client:runUnitTests --tests '*Rs2WalkerUnitTest'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microbot-2.6.58-runelite-1.13.6-walker-modes
+          if-no-files-found: error
+          path: ${{ runner.temp }}/microbot-2.6.58-runelite-1.13.6-walker-modes.jar
+      - name: Publish client and exact source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUILT_SHA"
+          gh auth setup-git
+          git push origin "$BUILT_SHA:refs/heads/release/microbot-2.6.58-walker-modes"
+          gh release create microbot-2.6.58-runelite-1.13.6-walker-modes "$RUNNER_TEMP/microbot-2.6.58-runelite-1.13.6-walker-modes.jar" \
+            --repo "$GITHUB_REPOSITORY" --target "$BUILT_SHA" \
+            --title 'Microbot 2.6.58 · RuneLite 1.13.6 · Walker click modes' \
+            --notes 'Web Walker → Settings → Walker click mode. Both, Minimap only, and Canvas only reuse the existing profile setting.'
