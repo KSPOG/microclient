@@ -28,7 +28,7 @@ jobs:
           test "$(git rev-parse refs/tags/runelite-parent-1.13.6)" = 451c5ac96f7b82fa02ce46a7df812b0714782477
           git diff --binary runelite-parent-1.12.38 runelite-parent-1.13.6 -- . ':!.github' ':!gradle.properties' > "$RUNNER_TEMP/runelite.patch"
           if ! git apply --3way "$RUNNER_TEMP/runelite.patch"; then
-            git status --short
+            git diff --cc --color=never
             git diff --name-only --diff-filter=U
             exit 1
           fi
