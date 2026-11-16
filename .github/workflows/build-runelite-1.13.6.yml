@@ -1,0 +1,55 @@
+name: Build Microbot with RuneLite 1.13.6
+on:
+  push:
+    branches: [update/runelite-1.13.6]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Apply upstream release changes
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/runelite/runelite.git \
+            refs/tags/runelite-parent-1.12.38:refs/tags/runelite-parent-1.12.38 \
+            refs/tags/runelite-parent-1.13.6:refs/tags/runelite-parent-1.13.6
+          test "$(git rev-parse refs/tags/runelite-parent-1.12.38)" = 5adc77c0169658ac6115c46215f7428acdf92a55
+          test "$(git rev-parse refs/tags/runelite-parent-1.13.6)" = 451c5ac96f7b82fa02ce46a7df812b0714782477
+          git diff --binary runelite-parent-1.12.38 runelite-parent-1.13.6 -- . ':!.github' ':!gradle.properties' > "$RUNNER_TEMP/runelite.patch"
+          if ! git apply --3way "$RUNNER_TEMP/runelite.patch"; then
+            git status --short
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+          sed -i -E 's/^(project\.build\.version|runelite\.injected-client\.version)=1\.12\.38$/\1=1.13.6/' gradle.properties
+          grep -Fx 'project.build.version=1.13.6' gradle.properties
+          grep -Fx 'runelite.injected-client.version=1.13.6' gradle.properties
+          git add -A
+          git diff --cached --binary HEAD > "$RUNNER_TEMP/microclient-runelite-1.13.6.patch"
+      - name: Build and smoke-test shaded client
+        shell: bash
+        run: |
+          bash ./gradlew :client:shadowJar
+          mapfile -t jars < <(find runelite-client/build/libs -maxdepth 1 -name '*-shaded.jar')
+          test "${#jars[@]}" -eq 1
+          unzip -tq "${jars[0]}"
+          timeout 30s java -jar "${jars[0]}" --help
+          cp "${jars[0]}" "$RUNNER_TEMP/microbot-2.6.22-runelite-1.13.6.jar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: microbot-2.6.22-runelite-1.13.6
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/microbot-2.6.22-runelite-1.13.6.jar
+            ${{ runner.temp }}/microclient-runelite-1.13.6.patch
