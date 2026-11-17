@@ -58,6 +58,17 @@ public class SceneClickPolicyTest {
     }
 
     @Test
+    public void exactDestinationDoesNotConfirmAdjacentTiles() {
+        LocalPoint target = tile(10, 10);
+        LocalPoint adjacent = tile(10, 11);
+        assertEquals(CONFIRMED, SceneClickPolicy.classify(null, target, target, 0));
+        assertEquals(DIVERTED, SceneClickPolicy.classify(null, adjacent, target, 0));
+        assertEquals(MISSED, SceneClickPolicy.classify(adjacent, adjacent, target, 0));
+        assertFalse(SceneClickPolicy.isSettled(adjacent, adjacent, target, 0));
+        assertTrue(SceneClickPolicy.isSettled(adjacent, target, target, 0));
+    }
+
+    @Test
     public void reportsDestinationErrorInTiles() {
         assertEquals(0, SceneClickPolicy.destinationErrorTiles(tile(4, 4), tile(4, 4)));
         assertEquals(7, SceneClickPolicy.destinationErrorTiles(tile(4, 11), tile(4, 4)));

@@ -44,10 +44,14 @@ public final class SceneClickPolicy {
     }
 
     public static Outcome classify(LocalPoint before, LocalPoint after, LocalPoint intended) {
+        return classify(before, after, intended, DESTINATION_TOLERANCE_TILES);
+    }
+
+    public static Outcome classify(LocalPoint before, LocalPoint after, LocalPoint intended, int tolerance) {
         if (after == null || intended == null) {
             return Outcome.MISSED;
         }
-        boolean nearIntended = tileDistance(after, intended) <= DESTINATION_TOLERANCE_TILES;
+        boolean nearIntended = tileDistance(after, intended) <= tolerance;
         if (nearIntended) {
             return Outcome.CONFIRMED;
         }
@@ -55,7 +59,11 @@ public final class SceneClickPolicy {
     }
 
     public static boolean isSettled(LocalPoint before, LocalPoint after, LocalPoint intended) {
-        return after != null && (!after.equals(before) || classify(before, after, intended) == Outcome.CONFIRMED);
+        return isSettled(before, after, intended, DESTINATION_TOLERANCE_TILES);
+    }
+
+    public static boolean isSettled(LocalPoint before, LocalPoint after, LocalPoint intended, int tolerance) {
+        return after != null && (!after.equals(before) || classify(before, after, intended, tolerance) == Outcome.CONFIRMED);
     }
 
     public static int destinationErrorTiles(LocalPoint after, LocalPoint intended) {

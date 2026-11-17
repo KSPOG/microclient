@@ -413,9 +413,16 @@ final class Rs2WalkerMovement {
                                                              WorldPoint playerLoc,
                                                              int maxEuclidean,
                                                              int rawAnchorIndex) {
-        WorldPoint fallback = findFurthestVisibleKnownRawPathPoint(rawPath, playerLoc,
-                maxEuclidean, rawAnchorIndex);
-        if (fallback == null || fallback.equals(playerLoc) || fallback.equals(target)) {
+        if (rawPath == null || rawPath.isEmpty() || playerLoc == null) {
+            return null;
+        }
+        WorldPoint canvasOnlyGoal = walkerClickMode() == WalkerClickMode.MINIMAP_ONLY
+                ? Rs2Walker.getCurrentTarget() : null;
+        WorldPoint fallback = findFurthestRawPathPointMatchingGated(rawPath, playerLoc, maxEuclidean,
+                rawAnchorIndex, candidate -> !candidate.equals(playerLoc)
+                        && !candidate.equals(target) && !candidate.equals(canvasOnlyGoal)
+                        && isKnownWalkableOrUnloaded(candidate) && isMiniMapClickable(candidate));
+        if (fallback == null) {
             return null;
         }
         if (walkMiniMap(fallback)) {
@@ -1009,7 +1016,7 @@ final class Rs2WalkerMovement {
     }
 
     static boolean walkCanvasDestination(WorldPoint goal, WorldPoint pathEnd, WorldPoint player) {
-        if (walkerClickMode() != WalkerClickMode.MINIMAP_ONLY || goal == null || !goal.equals(pathEnd)
+        if (goal == null || !goal.equals(pathEnd)
                 || player == null || player.getPlane() != goal.getPlane() || player.equals(goal)
                 || !Rs2Tile.isTileReachable(goal) || isWalkCancelled(goal)) {
             return false;
@@ -1049,8 +1056,13 @@ final class Rs2WalkerMovement {
         if (onClientThread) {
             return true;
         }
-        LocalPoint[] observed = awaitSceneWalkDestination(worldPoint, before);
-        SceneClickPolicy.Outcome outcome = SceneClickPolicy.classify(before, observed[0], observed[1]);
+        int tolerance = finalDestination ? 0 : SceneClickPolicy.DESTINATION_TOLERANCE_TILES;
+        LocalPoint[] observed = awaitSceneWalkDestination(worldPoint, before, tolerance);
+        SceneClickPolicy.Outcome outcome = SceneClickPolicy.classify(before, observed[0], observed[1], tolerance);
+        if (finalDestination && outcome != SceneClickPolicy.Outcome.CONFIRMED
+                && worldPoint.equals(Rs2Player.getWorldLocation())) {
+            outcome = SceneClickPolicy.Outcome.CONFIRMED;
+        }
         if (SCENE_CLICKS.record(outcome, System.currentTimeMillis())) {
             log.info("[Walker] Scene clicks failed repeatedly; temporarily pausing scene clicks for {}ms",
                     SceneClickPolicy.SUPPRESSION_MS);
@@ -1063,14 +1075,14 @@ final class Rs2WalkerMovement {
         return true;
     }
 
-    private static LocalPoint[] awaitSceneWalkDestination(WorldPoint worldPoint, LocalPoint before) {
+    private static LocalPoint[] awaitSceneWalkDestination(WorldPoint worldPoint, LocalPoint before, int tolerance) {
         Supplier<LocalPoint[]> snapshot = () -> Microbot.getClientThread().runOnClientThreadOptional(() ->
                 new LocalPoint[] {Microbot.getClient().getLocalDestinationLocation(), localPointForWorld(worldPoint)})
                 .orElse(new LocalPoint[2]);
         LocalPoint[][] latest = {snapshot.get()};
         sleepUntil(() -> {
             latest[0] = snapshot.get();
-            return SceneClickPolicy.isSettled(before, latest[0][0], latest[0][1]);
+            return SceneClickPolicy.isSettled(before, latest[0][0], latest[0][1], tolerance);
         }, () -> { }, SCENE_WALK_CONFIRM_TIMEOUT_MS, SCENE_WALK_CONFIRM_POLL_MS);
         return latest[0];
     }
@@ -1220,8 +1232,10 @@ final class Rs2WalkerMovement {
 
         boolean routeBacked = rawPath != null && !rawPath.isEmpty();
         int rawAnchorIndex = routeBacked ? rawAnchorIndexForPathPosition(rawPath, path, playerLoc) : -1;
+        boolean exactCanvasFinish = minimapModeUsesExactDestination(target, end)
+                || (finishTh == 0 && target.equals(end) && initialDist <= INTERIM_CLOSE_TILES);
         boolean clicked;
-        if (minimapModeUsesExactDestination(target, end)) {
+        if (exactCanvasFinish) {
             clicked = walkCanvasDestination(target, end, playerLoc);
         } else if (routeBacked) {
             clicked = clickRouteBackedShortWalk(rawPath, end, playerLoc,
@@ -1261,7 +1275,7 @@ final class Rs2WalkerMovement {
 
         if (!moved) {
             WorldPoint retryPlayerLoc = Rs2Player.getWorldLocation();
-            if (minimapModeUsesExactDestination(target, end)) {
+            if (exactCanvasFinish) {
                 clicked = walkCanvasDestination(target, end, retryPlayerLoc);
             } else if (routeBacked && retryPlayerLoc != null) {
                 int retryRawAnchorIndex = rawPathForwardAnchorIndex(rawPath, retryPlayerLoc, rawAnchorIndex);

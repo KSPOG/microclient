@@ -1885,6 +1885,7 @@ public class Rs2Walker {
         boolean lastAttemptedMinimapClickOk = false;
         long lastAttemptedMinimapClickAtMs = 0L;
         long pathfinderPendingSinceMs = 0L;
+        long processedTransportLandingAtMs = routeState.lastTransportHandledAtMs;
 
         Map<WorldPoint, Integer> reachableTilesCache = null;
         WorldPoint reachableTilesCacheOrigin = null;
@@ -2161,7 +2162,11 @@ public class Rs2Walker {
             // recalc, the interim goes stale, and the next continuation click sustains the spiral — the
             // walker can run minutes in the wrong corridor without ever replanning. Off-path, do nothing
             // here: the player stops, the "moving" deferral ends, and OFFPATH_RECALC replans properly.
-            if (clearedInterimTarget
+            long transportHandledAtMs = routeState.lastTransportHandledAtMs;
+            boolean confirmedTransportLanding = routeState.transportLandingObserved
+                    && transportHandledAtMs > processedTransportLandingAtMs;
+            processedTransportLandingAtMs = transportHandledAtMs;
+            if ((clearedInterimTarget || confirmedTransportLanding)
                     && firstInteractionAtRange == FirstRouteInteractionResult.NONE
                     && isNearPath(walkLoop.playerLoc)
                     && !walkLoop.interacting
@@ -2169,6 +2174,10 @@ public class Rs2Walker {
                     && !isDoorInteractionSettling()
                     && !isTransportInteractionSettling()
                     && tryIssueRouteContinuationClick(rawPath, path, target, distance)) {
+                if (confirmedTransportLanding) {
+                    tmarkPostTransport("post_transport_continuation_click", target,
+                            "to=" + compactWorldPoint(routeState.interimTargetWp));
+                }
                 walkerDiag("tail exempt exitReason=interim-close-route-click tailBefore=%d", processWalkTail);
                 processWalkTail--;
                 continue;
@@ -3280,7 +3289,9 @@ public class Rs2Walker {
                     if (finalPlayerLoc != null && Rs2Tile.isTileReachable(finalTile) && finalPlayerLoc.distanceTo(finalTile) >= finishTh) {
                         final WorldPoint canvasClickWp = finalTile;
                         boolean finalClick;
-                        if (minimapModeUsesExactDestination(target, canvasClickWp)) {
+                        if (minimapModeUsesExactDestination(target, canvasClickWp)
+                                || (finishTh == 0 && canvasClickWp.equals(target)
+                                    && finalPlayerLoc.distanceTo(target) <= INTERIM_CLOSE_TILES)) {
                             finalClick = walkCanvasDestination(target, canvasClickWp, finalPlayerLoc);
                         } else if (rawPath != null && !rawPath.isEmpty()) {
                             int rawAnchorIndex = rawAnchorIndexForPathPosition(rawPath, path, finalPlayerLoc);
@@ -3918,16 +3929,10 @@ public class Rs2Walker {
         WorldPoint clickedTarget = null;
         if (clickTarget != null && !clickTarget.equals(playerLoc)) {
             clickTarget = RouteRecovery.clampToEuclideanRadius(playerLoc, clickTarget, maxEuclidean - 1);
-            // The finish needs scene precision, not minimap reach. A minimap tile is a few pixels
-            // wide, so a click at the goal from 1-2 tiles out routinely quantizes onto a neighbour —
-            // measured as the last-tile dance (1784,3559 -> 1786,3559 -> 1784,3560 around a
-            // 1785,3560 goal). Inside the final band, click the exact tile on screen instead.
-            if (target != null && playerLoc.distanceTo2D(target) <= INTERIM_CLOSE_TILES
-                    && clickTarget.getPlane() == target.getPlane()
-                    && clickTarget.distanceTo2D(target) <= 1
-                    && walkFastCanvasWithAutoRun(clickTarget)) {
-                clickedTarget = clickTarget;
-                clicked = true;
+            if (clickTarget.equals(target) && playerLoc.distanceTo(target) <= INTERIM_CLOSE_TILES) {
+                // Require exact confirmation before arming a final-tile interim.
+                clicked = walkCanvasDestination(target, clickTarget, playerLoc);
+                clickedTarget = clicked ? target : null;
             } else {
                 clickedTarget = clickMiniMapOrFallback(rawPath, clickTarget, playerLoc,
                         maxEuclidean - 1, rawPath == null || rawPath.isEmpty(), rawAnchorIndex);
